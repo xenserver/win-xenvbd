@@ -292,6 +292,6 @@ if __name__ == '__main__':
     symstore_add('xenvbd', 'x86', debug[sys.argv[1]])
     symstore_add('xenvbd', 'x64', debug[sys.argv[1]])
 
-    listfile = callfnout(['hg','manifest'])   
+    listfile = callfnout(['git','ls-files'])   
     archive('xenvbd\\source.tgz', listfile.splitlines(), tgz=True)
     archive('xenvbd.tar', ['xenvbd','revision'])
