@@ -275,9 +275,9 @@ if __name__ == '__main__':
 
     print("BUILD_NUMBER=%s" % os.environ['BUILD_NUMBER'])
 
-    if 'MERCURIAL_REVISION' in os.environ.keys():
+    if 'GIT_REVISION' in os.environ.keys():
         revision = open('revision', 'w')
-        print(os.environ['MERCURIAL_REVISION'], file=revision)
+        print(os.environ['GIT_REVISION'], file=revision)
         revision.close()
 
     make_header()
