@@ -33,7 +33,7 @@
 #define _XENVBD_EVTCHN_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 
 
 NTSTATUS

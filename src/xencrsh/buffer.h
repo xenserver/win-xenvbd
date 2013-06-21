@@ -33,7 +33,7 @@
 #define _XENVBD_BUFFER_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 
 
 extern VOID

@@ -45,7 +45,7 @@
 #include "gnttab.h"
 #include "evtchn.h"
 
-#include "..\..\include\xencdb.h"
+#include <xencdb.h>
 #include "log.h"
 #include "assert.h"
 #include "util.h"

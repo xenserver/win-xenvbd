@@ -25,16 +25,18 @@ class msbuild_failure(Exception):
     def __str__(self):
         return repr(self.value)
 
-def msbuild(batfile, projdir, name, sdv_arg):
+def msbuild(name, target, args):
     cwd = os.getcwd()
 
+    os.environ['PLATFORM'] = 'x64'
     os.environ['CONFIGURATION'] = 'Windows 8 Release'
-    os.environ['SDV_PROJ'] = name
-    os.environ['SDV_ARG'] = sdv_arg
+    os.environ['TARGET'] = target
+    os.environ['BUILD_FILE'] = name + '.vcxproj'
+    os.environ['BUILD_ARGS'] = args
 
     os.chdir('proj')
-    os.chdir(projdir)
-    status = shell(batfile)
+    os.chdir(name)
+    status = shell('..\\msbuild.bat')
     os.chdir(cwd)
 
 #    if (status != None):
@@ -42,11 +44,10 @@ def msbuild(batfile, projdir, name, sdv_arg):
 
 
 if __name__ == '__main__':
-    msbuild('..\msbuild_sdv.bat', 'xencrsh', 'xencrsh.vcxproj', '/clean')
-    msbuild('..\msbuild_sdv.bat', 'xenvbd', 'xenvbd.vcxproj', '/clean')
-
-    msbuild('..\msbuild_sdv.bat', 'xencrsh', 'xencrsh.vcxproj', '/check:default.sdv')
-    msbuild('..\msbuild_sdv.bat', 'xenvbd', 'xenvbd.vcxproj', '/check:default.sdv')
-
-    msbuild('..\msbuild_dvl.bat', 'xencrsh', 'xencrsh.vcxproj', '')
-    msbuild('..\msbuild_dvl.bat', 'xenvbd', 'xenvbd.vcxproj', '')
+    msbuild('xencrsh', 'sdv', '/p:Inputs="/clean"')
+    msbuild('xenvbd',  'sdv', '/p:Inputs="/clean"')
+    msbuild('xencrsh', 'sdv', '/p:Inputs="/check:default.sdv"')
+    msbuild('xenvbd',  'sdv', '/p:Inputs="/check:default.sdv"')
+    msbuild('xencrsh', 'dvl', '')
+    msbuild('xenvbd',  'dvl', '')
+#archive the dvl.xmls

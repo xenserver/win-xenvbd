@@ -33,7 +33,7 @@
 #define _XENVBD_XENVBD_H
 
 #include "fdo.h"
-#include "..\..\include\xen.h"
+#include <xen.h>
 
 // Constants Not pulled in from xenvbd-wdm.h???
 #ifndef PAGE_SHIFT

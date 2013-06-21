@@ -47,8 +47,8 @@
 #include "log.h"
 #include "assert.h"
 #include "util.h"
-#include "..\..\include\xencdb.h"
-#include "..\..\include\names.h"
+#include <xencdb.h>
+#include <names.h>
 
 #include <stdlib.h>
 

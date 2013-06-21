@@ -30,20 +30,20 @@
  */ 
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
-
-
-#include "..\..\include\xen-version.h"
-#include "..\..\include\xen\xen-compat.h"
-
-#include "..\..\include\xen-types.h"
-#include "..\..\include\xen-warnings.h"
-#include "..\..\include\xen-errno.h"
-#include "..\..\include\xen\memory.h"
-#include "..\..\include\xen\event_channel.h"
-#include "..\..\include\xen\grant_table.h"
-#include "..\..\include\xen\hvm\params.h"
-#include "..\..\include\xen\io\xs_wire.h"
+#include <xenvbd-storport.h>
+         
+         
+#include <xen-version.h>
+#include <xen\xen-compat.h>
+         
+#include <xen-types.h>
+#include <xen-warnings.h>
+#include <xen-errno.h>
+#include <xen\memory.h>
+#include <xen\event_channel.h>
+#include <xen\grant_table.h>
+#include <xen\hvm\params.h>
+#include <xen\io\xs_wire.h>
 
 #include "evtchn.h"
 #include "hypercall.h"

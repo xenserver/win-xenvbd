@@ -30,14 +30,13 @@
  */ 
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 
 
-#include "..\..\include\xen-version.h"
-#include "..\..\include\xen\xen-compat.h"
-
-#include "..\..\include\xen-types.h"
-
+#include <xen-version.h>
+#include <xen\xen-compat.h>
+         
+#include <xen-types.h>
 
 #include "hypercall.h"
 

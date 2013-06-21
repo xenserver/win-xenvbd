@@ -33,7 +33,7 @@
 #define _XENVBD_AUSTERE_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 
 
 // Austere Allocation

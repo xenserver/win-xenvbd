@@ -37,16 +37,16 @@
 #include "pdo.h"
 #include "srbext.h"
 #include "buffer.h"
-#include "..\..\include\version.h"
+#include <version.h>
 
 #include "austere.h"
 
 #include "log.h"
 #include "assert.h"
-#include "..\..\include\names.h"
-#include "..\..\include\xencrsh_interface.h"
-
-#include "..\..\include\xenvbd-ntstrsafe.h"
+#include <names.h>
+#include <xencrsh_interface.h>
+         
+#include <xenvbd-ntstrsafe.h>
 
 static ULONG    __OperatingMode;
 
@@ -334,7 +334,6 @@ DllUnload(
 DRIVER_INITIALIZE   DriverEntry;
 
 NTSTATUS
-#pragma prefast(suppress:28101, "DriverEntry (XENCRSH)")
 DriverEntry(
     IN  PDRIVER_OBJECT  _DriverObject,
     IN  PUNICODE_STRING RegistryPath

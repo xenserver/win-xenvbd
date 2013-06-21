@@ -33,7 +33,7 @@
 #define _XENVBD_FDO_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 
 
 typedef struct _XENVBD_FDO XENVBD_FDO, *PXENVBD_FDO;

@@ -33,7 +33,7 @@
 #define _XENVBD_QUEUE_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 
 //typedef struct _XENVBD_SRBEXT {
 //    PVOID               QueueHead;  // Pointer to Queue (or NULL)
