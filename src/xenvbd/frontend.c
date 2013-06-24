@@ -1395,6 +1395,12 @@ FrontendDisable(
 }
 
 //=============================================================================
+static DECLSPEC_NOINLINE NTSTATUS
+__FrontendSetState(
+    __in  PXENVBD_FRONTEND        Frontend,
+    __in  XENVBD_STATE            State
+    );
+
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static VOID
 FrontendSuspendLateCallback(
@@ -1410,7 +1416,8 @@ FrontendSuspendLateCallback(
 
     PdoPreResume(Frontend->Pdo);
 
-    Status = FrontendSetState(Frontend, XENVBD_CLOSED);
+    // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
+    Status = __FrontendSetState(Frontend, XENVBD_CLOSED);
     if (!NT_SUCCESS(Status)) {
         Error("Target[%d] : SetState CLOSED (%08x)\n", Frontend->TargetId, Status);
         ASSERT(FALSE);
@@ -1426,7 +1433,8 @@ FrontendSuspendLateCallback(
     Frontend->NumEvents = Frontend->NumDpcs = 0;
     Frontend->RequestsOutstanding = Frontend->RequestsSubmitted = Frontend->ResponsesRecieved = 0;
 
-    Status = FrontendSetState(Frontend, State);
+    // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
+    Status = __FrontendSetState(Frontend, State);
     if (!NT_SUCCESS(Status)) {
         Error("Target[%d] : SetState %s (%08x)\n", Frontend->TargetId, __XenvbdStateName(State), Status);
         ASSERT(FALSE);
@@ -1623,22 +1631,22 @@ FrontendD0ToD3(
     KeReleaseSpinLock(&Frontend->StateLock, Irql);
 }
 
-__checkReturn
-NTSTATUS
-FrontendSetState(
+static DECLSPEC_NOINLINE NTSTATUS
+__FrontendSetState(
     __in  PXENVBD_FRONTEND        Frontend,
     __in  XENVBD_STATE            State
     )
 {
     NTSTATUS    Status;
-    KIRQL       Irql;
     const ULONG TargetId = Frontend->TargetId;
     BOOLEAN     Failed = FALSE;
 
-    KeAcquireSpinLock(&Frontend->StateLock, &Irql);
     Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
-    Verbose("Target[%d] : %s ----> %s\n", TargetId, __XenvbdStateName(Frontend->State), 
-                                        __XenvbdStateName(State));
+    Verbose("Target[%d] : %s ----> %s\n", 
+                TargetId, 
+                __XenvbdStateName(Frontend->State), 
+                __XenvbdStateName(State));
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
 
     while (!Failed && Frontend->State != State) {
         switch (Frontend->State) {
@@ -1759,8 +1767,25 @@ FrontendSetState(
         Verbose("Target[%d] : in state %s\n", TargetId, __XenvbdStateName(Frontend->State));
     }
     Trace("Target[%d] @ (%d) <===== (%s)\n", TargetId, KeGetCurrentIrql(), Failed ? "FAILED" : "SUCCEEDED");
-    KeReleaseSpinLock(&Frontend->StateLock, Irql);
     return Failed ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+}
+
+__checkReturn
+NTSTATUS
+FrontendSetState(
+    __in  PXENVBD_FRONTEND        Frontend,
+    __in  XENVBD_STATE            State
+    )
+{
+    NTSTATUS    Status;
+    KIRQL       Irql;
+
+    KeAcquireSpinLock(&Frontend->StateLock, &Irql);
+
+    Status = __FrontendSetState(Frontend, State);
+
+    KeReleaseSpinLock(&Frontend->StateLock, Irql);
+    return Status;
 }
 
 __drv_requiresIRQL(DISPATCH_LEVEL)
