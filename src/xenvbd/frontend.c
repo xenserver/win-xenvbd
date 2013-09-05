@@ -40,8 +40,8 @@
 #include "names.h"
 #include "notifier.h"
 #include "blockring.h"
+#include "granter.h"
 #include <store_interface.h>
-#include <gnttab_interface.h>
 #include <suspend_interface.h>
 
 #include <stdlib.h>
@@ -65,7 +65,6 @@ struct _XENVBD_FRONTEND {
 
     // Interfaces to XenBus
     PXENBUS_STORE_INTERFACE     Store;
-    PXENBUS_GNTTAB_INTERFACE    Gnttab;
     PXENBUS_SUSPEND_INTERFACE   Suspend;
 
     PXENBUS_SUSPEND_CALLBACK    SuspendLateCallback;
@@ -73,6 +72,7 @@ struct _XENVBD_FRONTEND {
     // Ring
     PXENVBD_NOTIFIER            Notifier;
     PXENVBD_BLOCKRING           BlockRing;
+    PXENVBD_GRANTER             Granter;
 
     // Backend State Watch
     BOOLEAN                     Active;
@@ -182,16 +182,7 @@ FrontendGnttabGet(
     __out PULONG                GrantRef
     )
 {
-    NTSTATUS    Status;
-
-    Status = GNTTAB(Get, Frontend->Gnttab, GrantRef);
-    if (NT_SUCCESS(Status)) {
-        GNTTAB(PermitForeignAccess, Frontend->Gnttab, *GrantRef,
-                                    Frontend->BackendId, GNTTAB_ENTRY_FULL_PAGE, 
-                                    Pfn, ReadOnly);
-    }
-
-    return Status;
+    return GranterGet(Frontend->Granter, Pfn, ReadOnly, GrantRef);
 }
 VOID
 FrontendGnttabPut(
@@ -199,8 +190,7 @@ FrontendGnttabPut(
     __in  ULONG                 GrantRef
     )
 {
-    GNTTAB(RevokeForeignAccess, Frontend->Gnttab, GrantRef);
-    GNTTAB(Put, Frontend->Gnttab, GrantRef);
+    GranterPut(Frontend->Granter, GrantRef);
 }
 VOID
 FrontendEvtchnTrigger(
@@ -864,7 +854,10 @@ FrontendConnect(
     XenbusState     BackendState;
 
     // Alloc Ring, Create Evtchn, Gnttab map
-    // ignore fail1 at the moment
+    Status = GranterConnect(Frontend->Granter, Frontend->BackendId);
+    if (!NT_SUCCESS(Status))
+        goto fail1;
+
     Status = BlockRingConnect(Frontend->BlockRing);
     if (!NT_SUCCESS(Status))
         goto fail2;
@@ -886,6 +879,10 @@ FrontendConnect(
             goto abort;
 
         Status = BlockRingStoreWrite(Frontend->BlockRing, Transaction, Frontend->FrontendPath);
+        if (!NT_SUCCESS(Status))
+            goto abort;
+
+        Status = GranterStoreWrite(Frontend->Granter, Transaction, Frontend->FrontendPath);
         if (!NT_SUCCESS(Status))
             goto abort;
 
@@ -960,7 +957,8 @@ fail3:
     BlockRingDisconnect(Frontend->BlockRing);
 fail2:
     Error("Fail2\n");
-//fail1:
+    GranterDisconnect(Frontend->Granter);
+fail1:
     Error("Fail1 (%08x)\n", Status);
     return Status;
 }
@@ -972,6 +970,7 @@ FrontendDisconnect(
 {
     NotifierDisconnect(Frontend->Notifier);
     BlockRingDisconnect(Frontend->BlockRing);
+    GranterDisconnect(Frontend->Granter);
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static FORCEINLINE VOID
@@ -982,6 +981,7 @@ FrontendEnable(
     Frontend->Caps.Connected = TRUE;
     KeMemoryBarrier();
 
+    GranterEnable(Frontend->Granter);
     BlockRingEnable(Frontend->BlockRing);
     NotifierEnable(Frontend->Notifier);
 }
@@ -995,6 +995,7 @@ FrontendDisable(
 
     NotifierDisable(Frontend->Notifier);
     BlockRingDisable(Frontend->BlockRing);
+    GranterDisable(Frontend->Granter);
 }
 
 //=============================================================================
@@ -1187,7 +1188,6 @@ FrontendD3ToD0(
 
     // acquire interfaces
     Frontend->Store   = FdoAcquireStore(PdoGetFdo(Frontend->Pdo));
-    Frontend->Gnttab  = FdoAcquireGnttab(PdoGetFdo(Frontend->Pdo));
     Frontend->Suspend = FdoAcquireSuspend(PdoGetFdo(Frontend->Pdo));
 
     // register suspend callback
@@ -1208,9 +1208,6 @@ fail1:
 
     SUSPEND(Release, Frontend->Suspend);
     Frontend->Suspend = NULL;
-    
-    GNTTAB(Release, Frontend->Gnttab);
-    Frontend->Gnttab = NULL;
     
     STORE(Release, Frontend->Store);
     Frontend->Store = NULL;
@@ -1246,9 +1243,6 @@ FrontendD0ToD3(
     // release interfaces
     SUSPEND(Release, Frontend->Suspend);
     Frontend->Suspend = NULL;
-    
-    GNTTAB(Release, Frontend->Gnttab);
-    Frontend->Gnttab = NULL;
     
     STORE(Release, Frontend->Store);
     Frontend->Store = NULL;
@@ -1335,6 +1329,10 @@ FrontendCreate(
     if (!NT_SUCCESS(Status))
         goto fail5;
 
+    Status = GranterCreate(Frontend, &Frontend->Granter);
+    if (!NT_SUCCESS(Status))
+        goto fail6;
+
     // kernel objects
     KeInitializeSpinLock(&Frontend->StateLock);
     
@@ -1342,6 +1340,10 @@ FrontendCreate(
     *_Frontend = Frontend;
     return STATUS_SUCCESS;
 
+fail6:
+    Error("fail6\n");
+    BlockRingDestroy(Frontend->BlockRing);
+    Frontend->BlockRing = NULL;
 fail5:
     Error("fail5\n");
     NotifierDestroy(Frontend->Notifier);
@@ -1374,6 +1376,9 @@ FrontendDestroy(
 
     PdoFreeInquiryData(Frontend->Inquiry);
     Frontend->Inquiry = NULL;
+
+    GranterDestroy(Frontend->Granter);
+    Frontend->Granter = NULL;
 
     BlockRingDestroy(Frontend->BlockRing);
     Frontend->BlockRing = NULL;
@@ -1466,6 +1471,7 @@ FrontendDebugCallback(
             "FRONTEND: DiskInfo            : %d\n", 
             Frontend->DiskInfo.DiskInfo);
 
+    GranterDebugCallback(Frontend->Granter, Debug, Callback);
     BlockRingDebugCallback(Frontend->BlockRing, Debug, Callback);
     NotifierDebugCallback(Frontend->Notifier, Debug, Callback);
 }

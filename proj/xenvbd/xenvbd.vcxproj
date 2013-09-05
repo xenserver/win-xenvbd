@@ -82,6 +82,7 @@
 		<ClCompile Include="../../src/xenvbd/thread.c" />
 		<ClCompile Include="../../src/xenvbd/notifier.c" />
 		<ClCompile Include="../../src/xenvbd/blockring.c" />
+		<ClCompile Include="../../src/xenvbd/granter.c" />
 	</ItemGroup>
 	<ItemGroup>
 		<ResourceCompile Include="..\..\src\xenvbd\xenvbd.rc" />
