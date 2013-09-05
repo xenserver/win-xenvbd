@@ -1,17 +1,43 @@
-; Copyright 2011 Citrix Systems Inc. All rights reserved.
-; Use is subject to license terms.
-; 
+; Copyright (c) Citrix Systems Inc.
+; All rights reserved.
+;
+; Redistribution and use in source and binary forms, 
+; with or without modification, are permitted provided 
+; that the following conditions are met:
+;
+; *   Redistributions of source code must retain the above 
+;     copyright notice, this list of conditions and the 
+;     following disclaimer.
+; *   Redistributions in binary form must reproduce the above 
+;     copyright notice, this list of conditions and the 
+;     following disclaimer in the documentation and/or other 
+;     materials provided with the distribution.
+;
+; THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND 
+; CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
+; INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+; MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+; DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
+; CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+; SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, 
+; BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR 
+; SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS 
+; INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, 
+; WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING 
+; NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE 
+; OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF 
+; SUCH DAMAGE.
  
 [Version] 
-Signature = "$Windows NT$" 
+Signature="$Windows NT$" 
 Class=SCSIAdapter
 ClassGUID={4D36E97B-E325-11CE-BFC1-08002BE10318} 
 Provider=%Citrix% 
 CatalogFile=xenvbd.cat
-DriverVer=09/07/2011,6.0.0.0
+DriverVer=01/01/1900,0.0.0.0
 
 [DestinationDirs] 
-DefaultDestDir = 12 
+DefaultDestDir=12 
 CoInst_CopyFiles=11
 
 [SourceDisksNames]
@@ -22,53 +48,53 @@ xenvbd.sys=0,,
 xencrsh.sys=0,,
 xenvbd_coinst.dll=0,,
 
+[Manufacturer] 
+%Citrix%=Citrix,NT$ARCH$
+
+[Citrix.NT$ARCH$]
+%XenVbdDesc%=XenVbd_Inst,XENBUS\VEN_XSC000&DEV_VBD&REV_00000001
+%XenVbdDesc%=XenVbd_Inst,XENBUS\VEN_XS0001&DEV_VBD&REV_00000001
+%XenVbdDesc%=XenVbd_Inst,XENBUS\VEN_XS0002&DEV_VBD&REV_00000001
+
+[XenVbd_Inst] 
+CopyFiles=XenVbd_Copyfiles
+
 [XenVbd_Copyfiles]
 xenvbd.sys
 xencrsh.sys
 
-[CoInst_CopyFiles]
-xenvbd_coinst.dll
-
-[Manufacturer] 
-%Citrix% = Citrix,NT$ARCH$
-
-[Citrix.NT$ARCH$]
-%XenVbdDesc%=XenVbd_Inst,XENBUS\CLASS_VBD&REV_02
-
-[XenVbd_Inst] 
-CopyFiles = XenVbd_Copyfiles
-
 [XenVbd_Inst.Services] 
-AddService = xenvbd,2,XenVbd_Service,
+AddService=xenvbd,2,XenVbd_Service,
 
 [XenVbd_Service] 
-DisplayName = %XenVbdDesc%
-ServiceType = %SERVICE_KERNEL_DRIVER% 
-StartType = %SERVICE_BOOT_START% 
-ErrorControl = %SERVICE_ERROR_NORMAL% 
-ServiceBinary = %12%\xenvbd.sys 
-LoadOrderGroup = "Scsi Miniport"
-AddReg = XenVbd_Parameters
+DisplayName=%XenVbdDesc%
+ServiceType=%SERVICE_KERNEL_DRIVER% 
+StartType=%SERVICE_BOOT_START% 
+ErrorControl=%SERVICE_ERROR_NORMAL% 
+ServiceBinary=%12%\xenvbd.sys 
+LoadOrderGroup="Scsi Miniport"
+AddReg=XenVbd_Parameters
 
 [XenVbd_Parameters] 
-HKR, Parameters\PnpInterface, 5, 0x00010001, 0x00000001 
-HKR, Parameters, BusType, 0x00010001, 0x00000001 
+HKR,"Parameters",,0x00000010
+HKR,"Parameters","BusType",0x00010001,0x00000001 
+HKR,"Parameters\PnpInterface","5",0x00010001,0x00000001 
 
 [XenVbd_Inst.CoInstallers]
 CopyFiles=CoInst_CopyFiles
 AddReg=CoInst_AddReg
 
+[CoInst_CopyFiles]
+xenvbd_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@MICRO_VERSION@_@BUILD_NUMBER@.dll,xenvbd_coinst.dll
+
 [CoInst_AddReg]
-HKR,,CoInstallers32,0x00010000,"xenvbd_coinst.dll,Entry"
+HKR,,CoInstallers32,0x00010000,"xenvbd_coinst_@MAJOR_VERSION@_@MINOR_VERSION@_@MICRO_VERSION@_@BUILD_NUMBER@.dll,Entry"
 
 [Strings] 
 
-;  *******Localizable Strings******* 
 Citrix= "Citrix Systems, Inc." 
-DiskDesc = "Citrix Tools for Virtual Machines" 
-XenVbdDesc= "Citrix PV Storage Host Adapter"
-
-;  *******Non Localizable Strings******* 
+DiskDesc = "XenServer Tools for Virtual Machines" 
+XenVbdDesc= "XenServer PV Storage Host Adapter"
 
 SERVICE_BOOT_START = 0x0 
 SERVICE_SYSTEM_START = 0x1 
@@ -81,6 +107,3 @@ SERVICE_ERROR_IGNORE = 0x0
 SERVICE_ERROR_NORMAL = 0x1 
 SERVICE_ERROR_SEVERE = 0x2 
 SERVICE_ERROR_CRITICAL = 0x3 
-
-REG_EXPAND_SZ = 0x00020000 
-REG_DWORD = 0x00010001 
