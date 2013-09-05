@@ -39,6 +39,7 @@
 #include "util.h"
 #include "names.h"
 #include "notifier.h"
+#include "blockring.h"
 #include <store_interface.h>
 #include <gnttab_interface.h>
 #include <suspend_interface.h>
@@ -71,15 +72,7 @@ struct _XENVBD_FRONTEND {
 
     // Ring
     PXENVBD_NOTIFIER            Notifier;
-    KSPIN_LOCK                  RingLock;
-    PMDL                        Mdl;
-    blkif_sring_t*              SharedRing;
-    blkif_front_ring_t          FrontRing;
-    ULONG                       RingOrder;
-    ULONG                       RingGrantRefs[XENVBD_MAX_RING_PAGES];
-    ULONG                       RequestsOutstanding;
-    ULONG                       RequestsSubmitted;
-    ULONG                       ResponsesRecieved;
+    PXENVBD_BLOCKRING           BlockRing;
 
     // Backend State Watch
     BOOLEAN                     Active;
@@ -89,8 +82,6 @@ struct _XENVBD_FRONTEND {
     PXENBUS_STORE_WATCH         BackendSectorSizeWatch;
     PXENBUS_STORE_WATCH         BackendSectorCountWatch;
 };
-
-#define XEN_IO_PROTO_ABI_NATIVE     "x86_32-abi"
 
 #define DOMID_INVALID (0x7FF4U)
 
@@ -302,160 +293,13 @@ out:
 }
 
 //=============================================================================
-static FORCEINLINE VOID
-xen_mb()
-{
-    KeMemoryBarrier();
-    _ReadWriteBarrier();
-}
-static FORCEINLINE VOID
-xen_wmb()
-{
-    KeMemoryBarrier();
-    _WriteBarrier();
-}
-static FORCEINLINE ULONG
-__Idx(
-    __in  ULONG   Index,
-    __in  ULONG   nr_ents
-    )
-{
-    if (nr_ents == 0)
-        return Index;
-    return Index & (nr_ents - 1);
-}
-
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static DECLSPEC_NOINLINE VOID
-__FrontendCompleteResponses(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
-    KeAcquireSpinLockAtDpcLevel(&Frontend->RingLock);
-
-    // Guard against this locked region being called after the 
-    // lock on FrontendSetState
-    if (Frontend->SharedRing == NULL)
-        goto done;
-
-    for (;;) {
-        ULONG   rsp_prod;
-        ULONG   rsp_cons;
-        int     notify;
-
-        rsp_prod = Frontend->SharedRing->rsp_prod;
-        rsp_cons = Frontend->FrontRing.rsp_cons;
-
-        xen_mb();
-
-        while (rsp_cons != rsp_prod) {
-            blkif_response_t*   Response;
-            PXENVBD_REQUEST     Request;
-            SHORT               Status;
-
-            Response = RING_GET_RESPONSE(&Frontend->FrontRing, rsp_cons);
-            Status = Response->status;
-            Request = (PXENVBD_REQUEST)(ULONG_PTR)(Response->id);
-
-            ++rsp_cons;
-
-            Frontend->ResponsesRecieved++;
-            Frontend->RequestsOutstanding--;
-
-            if (Request) {
-                PdoCompleteSubmittedRequest(Frontend->Pdo, Request, Status);
-            }
-
-            // zero request slot now its read
-            RtlZeroMemory(Response, sizeof(blkif_response_t));
-        }
-
-        Frontend->FrontRing.rsp_cons = rsp_cons;
-
-        xen_mb();
-
-        RING_FINAL_CHECK_FOR_RESPONSES(&Frontend->FrontRing, notify);
-        if (!notify)
-            break;
-    }
-
-done:
-    KeReleaseSpinLockFromDpcLevel(&Frontend->RingLock);
-}
-
-static FORCEINLINE BOOLEAN
-__FrontendCanSubmitRequest(
-    __in  PXENVBD_FRONTEND        Frontend,
-    __in  ULONG                   NumRequests
-    )
-{
-    // RING_PROD_SLOTS_AVAIL(...)
-    ULONG   Available = Frontend->FrontRing.nr_ents - (Frontend->FrontRing.req_prod_pvt - Frontend->FrontRing.rsp_cons);
-    if (Available > NumRequests)
-        return TRUE;
-    return FALSE;
-}
-
-static FORCEINLINE VOID
-__FrontendInsertRequestOnRing(
-    __in  PXENVBD_FRONTEND        Frontend,
-    __in  PXENVBD_REQUEST         Request
-    )
-{
-    ULONG                       Index;
-    blkif_request_t*            RingReq;
-    blkif_request_discard_t*    Discard;
-
-    RingReq = RING_GET_REQUEST(&Frontend->FrontRing, Frontend->FrontRing.req_prod_pvt);
-    
-    Frontend->FrontRing.req_prod_pvt++;
-
-    Frontend->RequestsSubmitted++;
-    Frontend->RequestsOutstanding++;
-
-    switch (Request->Operation) {
-    case BLKIF_OP_DISCARD:
-        Discard = (blkif_request_discard_t*)RingReq;
-        Discard->operation       = BLKIF_OP_DISCARD;
-        Discard->handle          = (USHORT)Frontend->DeviceId;
-        Discard->id              = (ULONG64)Request;
-        Discard->sector_number   = Request->FirstSector;
-        Discard->nr_sectors      = Request->NrSectors;
-        break;
-    case BLKIF_OP_READ:
-    case BLKIF_OP_WRITE:
-        RingReq->operation          = Request->Operation;
-        RingReq->nr_segments        = Request->NrSegments;
-        RingReq->handle             = (USHORT)Frontend->DeviceId;
-        RingReq->id                 = (ULONG64)Request;
-        RingReq->sector_number      = Request->FirstSector;
-        for (Index = 0; Index < Request->NrSegments; ++Index) {
-            RingReq->seg[Index].gref       = Request->Segments[Index].GrantRef;
-            RingReq->seg[Index].first_sect = Request->Segments[Index].FirstSector;
-            RingReq->seg[Index].last_sect  = Request->Segments[Index].LastSector;
-        }
-        break;
-    case BLKIF_OP_WRITE_BARRIER:
-        RingReq->operation          = Request->Operation;
-        RingReq->nr_segments        = 0;
-        RingReq->handle             = (USHORT)Frontend->DeviceId;
-        RingReq->id                 = (ULONG64)Request;
-        RingReq->sector_number      = Request->FirstSector;
-        break;
-    default:
-        ASSERT(FALSE);
-        break;
-    }
-}
-
 __drv_requiresIRQL(DISPATCH_LEVEL)
 VOID
 FrontendNotifyResponses(
     __in  PXENVBD_FRONTEND        Frontend
     )
 {
-    __FrontendCompleteResponses(Frontend);
+    BlockRingPoll(Frontend->BlockRing);
     PdoPrepareFresh(Frontend->Pdo);
     PdoSubmitPrepared(Frontend->Pdo);
     PdoCompleteShutdown(Frontend->Pdo);
@@ -467,30 +311,7 @@ FrontendSubmitRequest(
     __in  PSCSI_REQUEST_BLOCK       Srb
     )
 {
-    KIRQL           Irql;
-    PLIST_ENTRY     Entry;
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-    BOOLEAN         Success = FALSE;
-
-    ASSERT3P(SrbExt, !=, NULL);
-
-    KeAcquireSpinLock(&Frontend->RingLock, &Irql);
-
-    if (!__FrontendCanSubmitRequest(Frontend, SrbExt->RequestSize)) {
-        goto done;
-    }
-
-    for (Entry = SrbExt->RequestList.Flink; 
-            Entry != &SrbExt->RequestList; 
-            Entry = Entry->Flink) {
-        PXENVBD_REQUEST Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-        __FrontendInsertRequestOnRing(Frontend, Request);
-    }
-    Success = TRUE;
-
-done:
-    KeReleaseSpinLock(&Frontend->RingLock, Irql);
-    return Success;
+    return BlockRingSubmit(Frontend->BlockRing, Srb);
 }
 
 VOID
@@ -498,24 +319,12 @@ FrontendPushRequests(
     __in  PXENVBD_FRONTEND        Frontend
     )
 {
-    int notify;
-
-    RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&Frontend->FrontRing, notify);
-    if (notify) {
+    if (BlockRingPush(Frontend->BlockRing)) {
         NotifierSend(Frontend->Notifier);
     }
 }
 
 //=============================================================================
-extern PHYSICAL_ADDRESS MmGetPhysicalAddress(IN PVOID Buffer);
-static FORCEINLINE PFN_NUMBER
-__Pfn(
-    __in  PVOID                   VirtAddr,
-    __in  ULONG                   PageOffset
-    )
-{
-    return (PFN_NUMBER)(ULONG_PTR)(MmGetPhysicalAddress((PUCHAR)VirtAddr + (PageOffset * PAGE_SIZE)).QuadPart >> PAGE_SHIFT);
-}
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static NTSTATUS
 __UpdateBackendPath(
@@ -1004,11 +813,8 @@ FrontendPrepare(
     Frontend->Features.Discard      = (__ReadValue32(Frontend, "feature-discard", 0, NULL) == 1);
     Frontend->Features.FlushCache   = (__ReadValue32(Frontend, "feature-flush-cache", 0, NULL) == 1);
 
-    Frontend->RingOrder = __min(__ReadValue32(Frontend, "max-ring-page-order", 0, NULL), 
-                                XENVBD_MAX_RING_PAGE_ORDER);
-
-    Verbose("Target[%d] : BackendId=%d, RingOrder=%d, %s %s %s %s\n", 
-                Frontend->TargetId, Frontend->BackendId, Frontend->RingOrder, 
+    Verbose("Target[%d] : BackendId=%d, %s %s %s %s\n", 
+                Frontend->TargetId, Frontend->BackendId, 
                 Frontend->Caps.Removable ? "REMOVABLE" : "NOT_REMOVABLE",
                 Frontend->Features.Barrier ? "BARRIER" : "NOT_BARRIER",
                 Frontend->Features.Discard ? "DISCARD" : "NOT_DISCARD",
@@ -1055,31 +861,13 @@ FrontendConnect(
     )
 {
     NTSTATUS        Status;
-    ULONG           Index;
     XenbusState     BackendState;
-    const ULONG     RingPages = (1 << Frontend->RingOrder);
 
     // Alloc Ring, Create Evtchn, Gnttab map
-    Status = STATUS_NO_MEMORY;
-    Frontend->SharedRing = __AllocPages((SIZE_T)RingPages << PAGE_SHIFT, &Frontend->Mdl);
-    if (!Frontend->SharedRing)
-        goto fail1;
-
-#pragma warning(push)
-#pragma warning(disable: 4305)
-    SHARED_RING_INIT(Frontend->SharedRing);
-    FRONT_RING_INIT(&Frontend->FrontRing, Frontend->SharedRing, PAGE_SIZE << Frontend->RingOrder);
-#pragma warning(pop)
-
-    // GNTTAB
-    for (Index = 0; Index < RingPages; ++Index) {
-        Status = FrontendGnttabGet(Frontend, 
-                                    __Pfn(Frontend->SharedRing, Index), 
-                                    FALSE, 
-                                    &Frontend->RingGrantRefs[Index]);
-        if (!NT_SUCCESS(Status))
-            goto fail2;
-    }
+    // ignore fail1 at the moment
+    Status = BlockRingConnect(Frontend->BlockRing);
+    if (!NT_SUCCESS(Status))
+        goto fail2;
 
     Status = NotifierConnect(Frontend->Notifier, Frontend->BackendId);
     if (!NT_SUCCESS(Status))
@@ -1097,38 +885,12 @@ FrontendConnect(
         if (!NT_SUCCESS(Status))
             goto abort;
 
-        if (Frontend->RingOrder == 0) {
-            Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
-                            "ring-ref", "%u", Frontend->RingGrantRefs[0]);
-            if (!NT_SUCCESS(Status))
-                goto abort;
-        } else {
-            Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath, 
-                            "ring-page-order", "%u", Frontend->RingOrder);
-            if (!NT_SUCCESS(Status))
-                goto abort;
-
-            for (Index = 0; Index < RingPages; ++Index) {
-                PCHAR   RingRefName = DriverFormat("ring-ref%d", Index);
-                Status = STATUS_INSUFFICIENT_RESOURCES;
-                if (RingRefName == NULL)
-                    goto abort;
-
-                Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
-                                RingRefName, "%u", Frontend->RingGrantRefs[Index]);
-                DriverFormatFree(RingRefName);
-                if (!NT_SUCCESS(Status))
-                    goto abort;
-            }
-        }
-
-        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
-                        "target-id", "%u", Frontend->TargetId);
+        Status = BlockRingStoreWrite(Frontend->BlockRing, Transaction, Frontend->FrontendPath);
         if (!NT_SUCCESS(Status))
             goto abort;
 
-        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
-                        "protocol", XEN_IO_PROTO_ABI_NATIVE);
+        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
+                        "target-id", "%u", Frontend->TargetId);
         if (!NT_SUCCESS(Status))
             goto abort;
 
@@ -1195,18 +957,10 @@ fail4:
     NotifierDisconnect(Frontend->Notifier);
 fail3:
     Error("Fail3\n");
+    BlockRingDisconnect(Frontend->BlockRing);
 fail2:
     Error("Fail2\n");
-    for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
-        if (Frontend->RingGrantRefs[Index] != 0)
-            FrontendGnttabPut(Frontend, Frontend->RingGrantRefs[Index]);
-        Frontend->RingGrantRefs[Index] = 0;
-    }
-    RtlZeroMemory(&Frontend->FrontRing, sizeof(Frontend->FrontRing));
-    __FreePages(Frontend->SharedRing, Frontend->Mdl);
-    Frontend->SharedRing = NULL;
-    Frontend->Mdl = NULL;
-fail1:
+//fail1:
     Error("Fail1 (%08x)\n", Status);
     return Status;
 }
@@ -1216,22 +970,8 @@ FrontendDisconnect(
     __in  PXENVBD_FRONTEND        Frontend
     )
 {
-    ULONG   Index;
-
     NotifierDisconnect(Frontend->Notifier);
-
-    // GNTTAB
-    for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
-        if (Frontend->RingGrantRefs[Index] != 0)
-            FrontendGnttabPut(Frontend, Frontend->RingGrantRefs[Index]);
-        Frontend->RingGrantRefs[Index] = 0;
-    }
-
-    // SharedRing
-    RtlZeroMemory(&Frontend->FrontRing, sizeof(Frontend->FrontRing));
-    __FreePages(Frontend->SharedRing, Frontend->Mdl);
-    Frontend->SharedRing = NULL;
-    Frontend->Mdl = NULL;
+    BlockRingDisconnect(Frontend->BlockRing);
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static FORCEINLINE VOID
@@ -1242,6 +982,7 @@ FrontendEnable(
     Frontend->Caps.Connected = TRUE;
     KeMemoryBarrier();
 
+    BlockRingEnable(Frontend->BlockRing);
     NotifierEnable(Frontend->Notifier);
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
@@ -1253,6 +994,7 @@ FrontendDisable(
     Frontend->Caps.Connected = FALSE;
 
     NotifierDisable(Frontend->Notifier);
+    BlockRingDisable(Frontend->BlockRing);
 }
 
 //=============================================================================
@@ -1417,13 +1159,6 @@ FrontendSuspendLateCallback(
         Error("Target[%d] : SetState CLOSED (%08x)\n", Frontend->TargetId, Status);
         ASSERT(FALSE);
     }
-
-    // reset some stats - previous values are just not relevant any more
-    Verbose("Target[%d] : ResetFrom: %d Outstanding, %d Submitted, %d Recieved\n", 
-                Frontend->TargetId, Frontend->RequestsOutstanding, 
-                Frontend->RequestsSubmitted, Frontend->ResponsesRecieved);
-
-    Frontend->RequestsOutstanding = Frontend->RequestsSubmitted = Frontend->ResponsesRecieved = 0;
 
     // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
     Status = __FrontendSetState(Frontend, State);
@@ -1596,14 +1331,21 @@ FrontendCreate(
     if (!NT_SUCCESS(Status))
         goto fail4;
 
+    Status = BlockRingCreate(Frontend, Frontend->DeviceId, &Frontend->BlockRing);
+    if (!NT_SUCCESS(Status))
+        goto fail5;
+
     // kernel objects
     KeInitializeSpinLock(&Frontend->StateLock);
-    KeInitializeSpinLock(&Frontend->RingLock);
-
+    
     Trace("Target[%d] @ (%d) <===== (STATUS_SUCCESS)\n", Frontend->TargetId, KeGetCurrentIrql());
     *_Frontend = Frontend;
     return STATUS_SUCCESS;
 
+fail5:
+    Error("fail5\n");
+    NotifierDestroy(Frontend->Notifier);
+    Frontend->Notifier = NULL;
 fail4:
     Error("fail4\n");
     DriverFormatFree(Frontend->TargetPath);
@@ -1633,6 +1375,9 @@ FrontendDestroy(
     PdoFreeInquiryData(Frontend->Inquiry);
     Frontend->Inquiry = NULL;
 
+    BlockRingDestroy(Frontend->BlockRing);
+    Frontend->BlockRing = NULL;
+
     NotifierDestroy(Frontend->Notifier);
     Frontend->Notifier = NULL;
 
@@ -1645,8 +1390,6 @@ FrontendDestroy(
     ASSERT3P(Frontend->BackendPath, ==, NULL);
     ASSERT3P(Frontend->Inquiry, ==, NULL);
     ASSERT3P(Frontend->SuspendLateCallback, ==, NULL);
-    ASSERT3P(Frontend->SharedRing, ==, NULL);
-    ASSERT3U(Frontend->RingGrantRefs[0], ==, 0); // only ASSERTing on 1st entry
     ASSERT3P(Frontend->BackendStateWatch, ==, NULL);
     ASSERT3P(Frontend->BackendInfoWatch, ==, NULL);
     ASSERT3P(Frontend->BackendSectorSizeWatch, ==, NULL);
@@ -1658,84 +1401,6 @@ FrontendDestroy(
 
 //=============================================================================
 // Debug
-static DECLSPEC_NOINLINE VOID
-FrontendDebugRequests(
-    __in  blkif_sring_t*          SharedRing,
-    __in  ULONG                   nr_ents,
-    __in  PXENBUS_DEBUG_INTERFACE Debug,
-    __in  PXENBUS_DEBUG_CALLBACK  Callback
-    )
-{
-    union blkif_sring_entry*  Entry;
-    blkif_request_discard_t*  Discard;
-    PXENVBD_REQUEST     Request;
-    PVOID               Srb;
-    ULONG               Ptr;
-    ULONG               Idx;
-    ULONG               Start;
-    ULONG               End;
-
-    __try {
-        // dump outstanding requests
-        Start = SharedRing->req_event;
-        End   = SharedRing->req_prod + 1;
-        if (Start != End) {
-            for (Ptr = Start; Ptr < End; ++Ptr) {
-                Idx = __Idx(Ptr, nr_ents);
-                Entry = &(SharedRing->ring[Idx]);
-
-                switch (Entry->req.operation) {
-                case BLKIF_OP_DISCARD:
-                    Discard = (blkif_request_discard_t*)Entry;
-                    Request = (PXENVBD_REQUEST)(ULONG_PTR)Discard->id;
-                    Srb = Request ? Request->Srb : NULL;
-                    DEBUG(Printf, Debug, Callback,
-                          "FRONTEND: REQ [%-3d] { %02x, %02x, %04x, 0x%p, %lld, %lld } (0x%p)\n", 
-                          Idx,  BLKIF_OP_DISCARD,  0, 
-                          Discard->handle, (PVOID)(ULONG_PTR)Discard->id, 
-                          Discard->sector_number,  Discard->nr_sectors,
-                          Srb);
-                    break;
-
-                default:
-                    Request = (PXENVBD_REQUEST)(ULONG_PTR)Entry->req.id;
-                    Srb = Request ? Request->Srb : NULL;
-                    DEBUG(Printf, Debug, Callback,
-                          "FRONTEND: REQ [%-3d] { %02x, %02x, %04x, 0x%p, %lld, {...} } (0x%p)\n", 
-                          Idx,  Entry->req.operation,  Entry->req.nr_segments, 
-                          Entry->req.handle, (PVOID)(ULONG_PTR)Entry->req.id, 
-                          Entry->req.sector_number, Srb);
-                    break;
-                }
-            }
-        }
-#pragma warning(suppress: 6320)
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        DEBUG(Printf, Debug, Callback, "FRONTEND: EXCEPTION\n");
-    }
-    
-    __try {
-        // dump outstanding responses
-        Start = SharedRing->rsp_event - 1;
-        End   = SharedRing->rsp_prod;
-        if (Start != End) {
-            for (Ptr = Start; Ptr < End; ++Ptr) {
-                Idx = __Idx(Ptr, nr_ents);
-                Entry = &(SharedRing->ring[Idx]);
-                Request = (PXENVBD_REQUEST)(ULONG_PTR)Entry->rsp.id;
-                Srb = Request ? Request->Srb : NULL;
-
-                DEBUG(Printf, Debug, Callback,
-                      "FRONTEND: RSP [%-3d] { 0x%p, %02x, %04x } (0x%p)\n", 
-                      Idx,  (PVOID)(ULONG_PTR)Entry->rsp.id, 
-                      Entry->rsp.operation,  Entry->rsp.status, Srb);
-            }
-        }
-#pragma warning(suppress: 6320)
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-         DEBUG(Printf, Debug, Callback, "FRONTEND: EXCEPTION\n");
-    }
-}
 VOID
 FrontendDebugCallback(
     __in  PXENVBD_FRONTEND        Frontend,
@@ -1743,9 +1408,6 @@ FrontendDebugCallback(
     __in  PXENBUS_DEBUG_CALLBACK  Callback
     )
 {
-    ULONG   Index;
-    ULONG   RingPages = (ULONG)(1 << Frontend->RingOrder);
-
     DEBUG(Printf, Debug, Callback,
             "FRONTEND: TargetId            : %d\n", 
             Frontend->TargetId);
@@ -1803,67 +1465,8 @@ FrontendDebugCallback(
     DEBUG(Printf, Debug, Callback,
             "FRONTEND: DiskInfo            : %d\n", 
             Frontend->DiskInfo.DiskInfo);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: RequestsOutstanding : %d\n", 
-            Frontend->RequestsOutstanding);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: RequestsSubmitted   : %d\n", 
-            Frontend->RequestsSubmitted);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: ResponsesRecieved   : %d\n", 
-            Frontend->ResponsesRecieved);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: SharedRing          : 0x%p\n", 
-            Frontend->SharedRing);
-    if (Frontend->SharedRing) {
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: SharedRing.req_prod : %d (%d)\n", 
-                Frontend->SharedRing->req_prod, 
-                __Idx(Frontend->SharedRing->req_prod, 
-                Frontend->FrontRing.nr_ents));
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: SharedRing.req_event: %d (%d)\n", 
-                Frontend->SharedRing->req_event, 
-                __Idx(Frontend->SharedRing->req_event, 
-                Frontend->FrontRing.nr_ents));
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: SharedRing.rsp_prod : %d (%d)\n", 
-                Frontend->SharedRing->rsp_prod, 
-                __Idx(Frontend->SharedRing->rsp_prod, 
-                Frontend->FrontRing.nr_ents));
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: SharedRing.rsp_event: %d (%d)\n", 
-                Frontend->SharedRing->rsp_event, 
-                __Idx(Frontend->SharedRing->rsp_event, 
-                Frontend->FrontRing.nr_ents));
-        FrontendDebugRequests(Frontend->SharedRing, Frontend->FrontRing.nr_ents, Debug, Callback);
-    }
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FrontRing.req_prod  : %d (%d)\n", 
-            Frontend->FrontRing.req_prod_pvt, 
-            __Idx(Frontend->FrontRing.req_prod_pvt, 
-            Frontend->FrontRing.nr_ents));
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FrontRing.rsp_cons  : %d (%d)\n", 
-            Frontend->FrontRing.rsp_cons, 
-            __Idx(Frontend->FrontRing.rsp_cons, 
-            Frontend->FrontRing.nr_ents));
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FrontRing.nr_ents   : %d\n", 
-            Frontend->FrontRing.nr_ents);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: RingOrder           : %d (%d pages)\n", 
-            Frontend->RingOrder,
-            RingPages);
-    for (Index = 0; Index < RingPages; ++Index) {
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: RingGrantRef[%-2d]    : %d\n", 
-                Index, Frontend->RingGrantRefs[Index]);
-    }
 
+    BlockRingDebugCallback(Frontend->BlockRing, Debug, Callback);
     NotifierDebugCallback(Frontend->Notifier, Debug, Callback);
-
-    Frontend->RequestsSubmitted = 0;
-    Frontend->ResponsesRecieved = 0;
 }
 
