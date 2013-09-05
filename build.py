@@ -171,7 +171,7 @@ def msbuild(name, arch, debug):
     os.environ['CONFIGURATION'] = configuration
     os.environ['TARGET'] = 'Build'
     os.environ['BUILD_FILE'] = name + '.sln'
-    os.environ['BUILD_ARGS'] = '/p:SignMode="ProductionSign"'
+    os.environ['BUILD_ARGS'] = ''
 
     os.chdir('proj')
     status = shell('msbuild.bat')
