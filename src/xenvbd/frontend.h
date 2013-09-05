@@ -127,23 +127,31 @@ FrontendStoreFree(
     __in  PXENVBD_FRONTEND      Frontend,
     __in  PCHAR                 Value
     );    
-
-// Init/Term
-__checkReturn
+__drv_maxIRQL(DISPATCH_LEVEL)
 extern NTSTATUS
-FrontendCreate(
-    __in  PXENVBD_PDO             Pdo,
-    __in  PCHAR                   DeviceId, 
-    __in  ULONG                   TargetId, 
-    __in  PKEVENT                 Event,
-    __out PXENVBD_FRONTEND*       _Frontend
-    );
-
-extern VOID
-FrontendDestroy(
+FrontendWriteUsage(
     __in  PXENVBD_FRONTEND        Frontend
     );
 
+// Ring
+__drv_requiresIRQL(DISPATCH_LEVEL)
+extern VOID
+FrontendNotifyResponses(
+    __in  PXENVBD_FRONTEND        Frontend
+    );
+
+extern BOOLEAN
+FrontendSubmitRequest(
+    __in  PXENVBD_FRONTEND          Frontend,
+    __in  PSCSI_REQUEST_BLOCK       Srb
+    );
+
+extern VOID
+FrontendPushRequests(
+    __in  PXENVBD_FRONTEND          Frontend
+    );
+
+// Init/Term
 __checkReturn
 __drv_maxIRQL(DISPATCH_LEVEL)
 extern NTSTATUS
@@ -170,29 +178,19 @@ FrontendBackendPathChanged(
     __in  PXENVBD_FRONTEND        Frontend
     );
 
-// Writing
-__drv_maxIRQL(DISPATCH_LEVEL)
+__checkReturn
 extern NTSTATUS
-FrontendWriteUsage(
-    __in  PXENVBD_FRONTEND        Frontend
-    );
-
-// Ring Slots
-__drv_requiresIRQL(DISPATCH_LEVEL)
-extern VOID
-FrontendEvtchnCallback(
-    __in  PXENVBD_FRONTEND        Frontend
-    );
-
-extern BOOLEAN
-FrontendSubmitRequest(
-    __in  PXENVBD_FRONTEND          Frontend,
-    __in  PSCSI_REQUEST_BLOCK       Srb
+FrontendCreate(
+    __in  PXENVBD_PDO             Pdo,
+    __in  PCHAR                   DeviceId, 
+    __in  ULONG                   TargetId, 
+    __in  PKEVENT                 Event,
+    __out PXENVBD_FRONTEND*       _Frontend
     );
 
 extern VOID
-FrontendPushRequests(
-    __in  PXENVBD_FRONTEND          Frontend
+FrontendDestroy(
+    __in  PXENVBD_FRONTEND        Frontend
     );
 
 // Debug

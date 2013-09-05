@@ -1872,7 +1872,7 @@ PdoReset(
             channel callback directly, since scsiport won't run the
             callback itself until we finish this SRB (which is also
             why we don't need to worry about races). */
-        FrontendEvtchnCallback(Pdo->Frontend);
+        FrontendNotifyResponses(Pdo->Frontend);
         FrontendEvtchnSend(Pdo->Frontend);
 
         if (QueuePeek(&Pdo->PreparedSrbs) || 
@@ -1888,7 +1888,7 @@ PdoReset(
         }
     }
 
-    FrontendEvtchnCallback(Pdo->Frontend);
+    FrontendNotifyResponses(Pdo->Frontend);
     FrontendEvtchnSend(Pdo->Frontend);
 
     Trace("Target[%d] <==== (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());

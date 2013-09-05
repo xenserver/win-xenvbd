@@ -268,6 +268,37 @@ FrontendStoreFree(
 {
     STORE(Free, Frontend->Store, Value);
 }
+__drv_maxIRQL(DISPATCH_LEVEL)
+NTSTATUS
+FrontendWriteUsage(
+    __in  PXENVBD_FRONTEND        Frontend
+    )
+{
+    NTSTATUS    Status;
+
+    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
+                        "paging", "%u", Frontend->Caps.Paging);
+    if (!NT_SUCCESS(Status))
+        goto out;
+
+    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
+                        "hibernation", "%u", Frontend->Caps.Hibernation);
+    if (!NT_SUCCESS(Status))
+        goto out;
+
+    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
+                        "dump", "%u", Frontend->Caps.DumpFile);
+    if (!NT_SUCCESS(Status))
+        goto out;
+
+    Verbose("Target[%d] : %s %s %s\n", Frontend->TargetId,
+                    Frontend->Caps.DumpFile ? "DUMP" : "NOT_DUMP", 
+                    Frontend->Caps.Hibernation ? "HIBER" : "NOT_HIBER",
+                    Frontend->Caps.Paging ? "PAGE" : "NOT_PAGE");
+
+out:
+    return Status;
+}
 
 //=============================================================================
 static FORCEINLINE VOID
@@ -352,18 +383,6 @@ done:
     KeReleaseSpinLockFromDpcLevel(&Frontend->RingLock);
 }
 
-__drv_requiresIRQL(DISPATCH_LEVEL)
-VOID
-FrontendEvtchnCallback(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    __FrontendCompleteResponses(Frontend);
-    PdoPrepareFresh(Frontend->Pdo);
-    PdoSubmitPrepared(Frontend->Pdo);
-    PdoCompleteShutdown(Frontend->Pdo);
-}
-
 KSERVICE_ROUTINE EvtchnInterruptFunc;
 
 BOOLEAN
@@ -434,11 +453,10 @@ EvtchnDpcFunc(
 
     do {
         if (Frontend->Caps.Connected)
-            FrontendEvtchnCallback(Frontend);
+            FrontendNotifyResponses(Frontend);
     } while (__EvtchnPending(Frontend) && Frontend->Caps.Connected);
 }
-//=============================================================================
-// Ring Slots
+
 static FORCEINLINE BOOLEAN
 __FrontendCanSubmitRequest(
     __in  PXENVBD_FRONTEND        Frontend,
@@ -504,6 +522,18 @@ __FrontendInsertRequestOnRing(
     }
 }
 
+__drv_requiresIRQL(DISPATCH_LEVEL)
+VOID
+FrontendNotifyResponses(
+    __in  PXENVBD_FRONTEND        Frontend
+    )
+{
+    __FrontendCompleteResponses(Frontend);
+    PdoPrepareFresh(Frontend->Pdo);
+    PdoSubmitPrepared(Frontend->Pdo);
+    PdoCompleteShutdown(Frontend->Pdo);
+}
+
 BOOLEAN
 FrontendSubmitRequest(
     __in  PXENVBD_FRONTEND          Frontend,
@@ -552,15 +582,13 @@ FrontendPushRequests(
 //=============================================================================
 extern PHYSICAL_ADDRESS MmGetPhysicalAddress(IN PVOID Buffer);
 static FORCEINLINE PFN_NUMBER
-__VirtToPfn(
-    __in  PVOID                   VirtAddr
+__Pfn(
+    __in  PVOID                   VirtAddr,
+    __in  ULONG                   PageOffset
     )
 {
-    PHYSICAL_ADDRESS PhysAddr = MmGetPhysicalAddress(VirtAddr);
-    return (PFN_NUMBER)(ULONG_PTR)(PhysAddr.QuadPart >> 12);
+    return (PFN_NUMBER)(ULONG_PTR)(MmGetPhysicalAddress((PUCHAR)VirtAddr + (PageOffset * PAGE_SIZE)).QuadPart >> PAGE_SHIFT);
 }
-
-//=============================================================================
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static NTSTATUS
 __UpdateBackendPath(
@@ -712,340 +740,6 @@ ___SetState(
     return Status;
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE NTSTATUS
-__WriteTargetPath(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    NTSTATUS    Status;
-
-    Status = FrontendWriteUsage(Frontend);
-    if (!NT_SUCCESS(Status))
-        goto out;
-
-    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
-                        "frontend", "%s", Frontend->FrontendPath);
-    if (!NT_SUCCESS(Status))
-        goto out;
-
-    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
-                        "device", "%u", Frontend->DeviceId);
-    if (!NT_SUCCESS(Status))
-        goto out;
-
-out:
-    return Status;
-}
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE VOID
-__ReadFeatures(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    NTSTATUS    Status;
-    PCHAR       Buffer;
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath, 
-                        "removable", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        Frontend->Caps.Removable = (strtoul(Buffer, NULL, 10) == 1);
-        STORE(Free, Frontend->Store, Buffer);
-    }
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath,
-                        "max-ring-page-order", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        Frontend->RingOrder = __min(strtoul(Buffer, NULL, 10),
-                                        XENVBD_MAX_RING_PAGE_ORDER);
-        STORE(Free, Frontend->Store, Buffer);
-    } else {
-        Frontend->RingOrder = 0;
-    }
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath,
-                        "feature-barrier", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        Frontend->Features.Barrier = (strtoul(Buffer, NULL, 10) == 1);
-        STORE(Free, Frontend->Store, Buffer);
-    } else {
-        Frontend->Features.Barrier = FALSE;
-    }
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath,
-                        "feature-discard", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        Frontend->Features.Discard = (strtoul(Buffer, NULL, 10) == 1);
-        STORE(Free, Frontend->Store, Buffer);
-    } else {
-        Frontend->Features.Discard = FALSE;
-    }
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath,
-                        "feature-flush-cache", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        Frontend->Features.FlushCache = (strtoul(Buffer, NULL, 10) == 1);
-        STORE(Free, Frontend->Store, Buffer);
-    } else {
-        Frontend->Features.FlushCache = FALSE;
-    }
-}
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static BOOLEAN
-__ReadDiskInfo(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    NTSTATUS    Status;
-    PCHAR       Buffer;
-    BOOLEAN     Updated = FALSE;
-
-    if (Frontend->Store == NULL)
-        return FALSE;
-    if (Frontend->BackendPath == NULL)
-        return FALSE;
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath, 
-                        "info", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        ULONG   DiskInfo;
-        DiskInfo = strtoul(Buffer, NULL, 10);
-        STORE(Free, Frontend->Store, Buffer);
-        
-        if (Frontend->DiskInfo.DiskInfo != DiskInfo) {
-            Frontend->DiskInfo.DiskInfo = DiskInfo;
-            Frontend->Caps.SurpriseRemovable = (Frontend->DiskInfo.DiskInfo & VDISK_REMOVABLE);
-            Updated = TRUE;
-            if (Frontend->DiskInfo.DiskInfo & VDISK_READONLY) {
-                Warning("Target[%d] : DiskInfo contains VDISK_READONLY flag!\n", Frontend->TargetId);
-            }
-            if (Frontend->DiskInfo.DiskInfo & VDISK_CDROM) {
-                Warning("Target[%d] : DiskInfo contains VDISK_CDROM flag!\n", Frontend->TargetId);
-            }
-        }
-    }
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath, 
-                        "sector-size", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        ULONG   SectorSize;
-        SectorSize = strtoul(Buffer, NULL, 10);
-        STORE(Free, Frontend->Store, Buffer);
-
-        if (Frontend->DiskInfo.SectorSize != SectorSize) {
-            Frontend->DiskInfo.SectorSize = SectorSize;
-            Updated = TRUE;
-            if (Frontend->DiskInfo.SectorSize == 0) {
-                Error("Target[%d] : Invalid SectorSize!\n", Frontend->TargetId);
-            }
-        }
-    }
-
-    Status = STORE(Read, Frontend->Store, NULL, Frontend->BackendPath, 
-                        "sectors", &Buffer);
-    if (NT_SUCCESS(Status)) {
-        ULONG64 SectorCount;
-        SectorCount = _strtoui64(Buffer, NULL, 10);
-        STORE(Free, Frontend->Store, Buffer);
-
-        if (Frontend->DiskInfo.SectorCount != SectorCount) {
-            Frontend->DiskInfo.SectorCount = SectorCount;
-            Updated = TRUE;
-            if (Frontend->DiskInfo.SectorCount == 0) {
-                Error("Target[%d] : Invalid SectorCount!\n", Frontend->TargetId);
-            }
-        }
-    }
-
-    return Updated;
-}
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE NTSTATUS
-__AllocRing(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    NTSTATUS            Status;
-    ULONG               Index;
-    BOOLEAN             Pending;
-    const ULONG         RingPages = (1 << Frontend->RingOrder);
-
-    // SharedRing
-    ASSERT3P(Frontend->SharedRing, ==, NULL);
-    Frontend->SharedRing = __AllocPages((SIZE_T)RingPages << PAGE_SHIFT, &Frontend->Mdl);
-
-    Status = STATUS_INSUFFICIENT_RESOURCES;
-    if (!Frontend->SharedRing)
-        goto fail1;
-
-#pragma warning(push)
-#pragma warning(disable: 4305)
-    SHARED_RING_INIT(Frontend->SharedRing);
-    FRONT_RING_INIT(&Frontend->FrontRing, Frontend->SharedRing, PAGE_SIZE << Frontend->RingOrder);
-#pragma warning(pop)
-
-    // GNTTAB
-    for (Index = 0; Index < RingPages; ++Index) {
-        ULONG       RingRef;
-        PFN_NUMBER  Pfn = __VirtToPfn((PUCHAR)Frontend->SharedRing + (Index * PAGE_SIZE));
-
-        ASSERT3U(Frontend->RingGrantRefs[Index], ==, 0);
-
-        Status = GNTTAB(Get, Frontend->Gnttab, &RingRef);
-        if (!NT_SUCCESS(Status))
-            goto fail2;
-
-        GNTTAB(PermitForeignAccess, Frontend->Gnttab, RingRef, Frontend->BackendId, 
-                    GNTTAB_ENTRY_FULL_PAGE, Pfn, FALSE);
-
-        Frontend->RingGrantRefs[Index] = RingRef;
-    }
-
-    // EVTCHN
-    ASSERT3P(Frontend->EvtchnPort, ==, NULL);
-    Frontend->EvtchnPort = EVTCHN(Open, Frontend->Evtchn, EVTCHN_UNBOUND, EvtchnInterruptFunc,
-                                    Frontend, Frontend->BackendId, TRUE);
-    if (Frontend->EvtchnPort == NULL)
-        goto fail3;
-
-    Frontend->EvtchnPortNumber = EVTCHN(Port, Frontend->Evtchn, Frontend->EvtchnPort);
-
-    Pending = EVTCHN(Unmask, Frontend->Evtchn, Frontend->EvtchnPort, FALSE);
-    if (Pending)
-        EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
-
-    return STATUS_SUCCESS;
-
-fail3:
-    Error("Fail3\n");
-    for (Index = 0; Index < RingPages; ++Index) {
-        if (Frontend->RingGrantRefs[Index] != 0) {
-            GNTTAB(RevokeForeignAccess, Frontend->Gnttab, Frontend->RingGrantRefs[Index]);
-            GNTTAB(Put, Frontend->Gnttab, Frontend->RingGrantRefs[Index]);
-            Frontend->RingGrantRefs[Index] = 0;
-        }
-    }
-
-fail2:
-    Error("Fail2\n");
-    RtlZeroMemory(&Frontend->FrontRing, sizeof(Frontend->FrontRing));
-    MmFreeContiguousMemory(Frontend->SharedRing);
-    Frontend->SharedRing = NULL;
-
-fail1:
-    Error("Fail1 (%08x)\n", Status);
-    return Status;
-}
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static VOID
-__FreeRing(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    ULONG   Index;
-
-    // EVTCHN
-    if (Frontend->EvtchnPort) {
-        EVTCHN(Close, Frontend->Evtchn, Frontend->EvtchnPort);
-        Frontend->EvtchnPort = NULL;
-        Frontend->EvtchnPortNumber = 0;
-    }
-
-    // GNTTAB
-    for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
-        if (Frontend->RingGrantRefs[Index] != 0) {
-            GNTTAB(RevokeForeignAccess, Frontend->Gnttab, Frontend->RingGrantRefs[Index]);
-            GNTTAB(Put, Frontend->Gnttab, Frontend->RingGrantRefs[Index]);
-            Frontend->RingGrantRefs[Index] = 0;
-        }
-    }
-
-    // SharedRing
-    RtlZeroMemory(&Frontend->FrontRing, sizeof(Frontend->FrontRing));
-    __FreePages(Frontend->SharedRing, Frontend->Mdl);
-    Frontend->SharedRing = NULL;
-    Frontend->Mdl = NULL;
-}
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE NTSTATUS
-__WriteRing(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    NTSTATUS    Status;
-    const ULONG RingPages = (1 << Frontend->RingOrder);
-    
-    for (;;) {
-        PXENBUS_STORE_TRANSACTION   Transaction;
-        ULONG                       Index;
-
-        Status = STORE(TransactionStart, Frontend->Store, &Transaction);
-        if (!NT_SUCCESS(Status))
-            break;
-
-        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath, 
-                        "event-channel", "%u", Frontend->EvtchnPortNumber);
-        if (!NT_SUCCESS(Status))
-            goto abort;
-
-        if (Frontend->RingOrder == 0) {
-            Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
-                            "ring-ref", "%u", Frontend->RingGrantRefs[0]);
-            if (!NT_SUCCESS(Status))
-                goto abort;
-        } else {
-            Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath, 
-                            "ring-page-order", "%u", Frontend->RingOrder);
-            if (!NT_SUCCESS(Status))
-                goto abort;
-
-            for (Index = 0; Index < RingPages; ++Index) {
-                PCHAR   RingRefName = DriverFormat("ring-ref%d", Index);
-                Status = STATUS_INSUFFICIENT_RESOURCES;
-                if (RingRefName == NULL)
-                    goto abort;
-
-                Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
-                                RingRefName, "%u", Frontend->RingGrantRefs[Index]);
-                DriverFormatFree(RingRefName);
-                if (!NT_SUCCESS(Status))
-                    goto abort;
-            }
-        }
-
-        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
-                        "target-id", "%u", Frontend->TargetId);
-        if (!NT_SUCCESS(Status))
-            goto abort;
-
-        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
-                        "protocol", XEN_IO_PROTO_ABI_NATIVE);
-        if (!NT_SUCCESS(Status))
-            goto abort;
-
-        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
-                        "feature-surprise-remove", "1");
-        if (!NT_SUCCESS(Status))
-            goto abort;
-
-        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
-                        "feature-online-resize", "1");
-        if (!NT_SUCCESS(Status))
-            goto abort;
-
-        Status = STORE(TransactionEnd, Frontend->Store, Transaction, TRUE);
-        if (Status == STATUS_RETRY)
-            continue;
-
-        return Status;
-
-abort:
-        (VOID) STORE(TransactionEnd, Frontend->Store, Transaction, FALSE);
-        break;
-    }
-
-    return Status;
-}
-__drv_requiresIRQL(DISPATCH_LEVEL)
 static FORCEINLINE VOID
 __CheckBackendForEject(
     __in  PXENVBD_FRONTEND        Frontend
@@ -1114,6 +808,122 @@ abort:
         PdoIssueDeviceEject(Frontend->Pdo, XenbusStateName(BackendState));
     }    
 }
+
+static FORCEINLINE ULONG
+__ReadValue32(
+    __in  PXENVBD_FRONTEND          Frontend,
+    __in  PCHAR                     Name,
+    __in  ULONG                     Default,
+    __out_opt PBOOLEAN              Changed
+    )
+{
+    NTSTATUS        status;
+    PCHAR           Buffer;
+    ULONG           Value = Default;
+
+    status = STORE(Read, 
+                    Frontend->Store, 
+                    NULL, 
+                    Frontend->BackendPath,
+                    Name,
+                    &Buffer);
+    if (NT_SUCCESS(status)) {
+        Value = strtoul(Buffer, NULL, 10);
+        STORE(Free, Frontend->Store, Buffer);
+
+        if (Default != Value && Changed)
+            *Changed = TRUE;
+    }
+
+    return Value;
+}
+static FORCEINLINE ULONG64
+__ReadValue64(
+    __in  PXENVBD_FRONTEND          Frontend,
+    __in  PCHAR                     Name,
+    __in  ULONG64                   Default,
+    __out_opt PBOOLEAN              Changed
+    )
+{
+    NTSTATUS        status;
+    PCHAR           Buffer;
+    ULONG64         Value = Default;
+
+    status = STORE(Read, 
+                    Frontend->Store, 
+                    NULL, 
+                    Frontend->BackendPath,
+                    Name,
+                    &Buffer);
+    if (NT_SUCCESS(status)) {
+        Value = _strtoui64(Buffer, NULL, 10);
+        STORE(Free, Frontend->Store, Buffer);
+
+        if (Default != Value && Changed)
+            *Changed = TRUE;
+    }
+
+    return Value;
+}
+static FORCEINLINE ULONG
+__Size(
+    __in  PXENVBD_DISKINFO          Info
+    )
+{
+    ULONG64 MBytes = (Info->SectorSize * Info->SectorCount) >> 20; // / (1024 * 1024); 
+    if (MBytes < 10240)
+        return (ULONG)MBytes;
+    return (ULONG)(MBytes >> 10); // / 1024
+}
+static FORCEINLINE PCHAR
+__Units(
+    __in  PXENVBD_DISKINFO          Info
+    )
+{
+    ULONG64 MBytes = (Info->SectorSize * Info->SectorCount) >> 20; // / (1024 * 1024); 
+    if (MBytes < 10240)
+        return "MB";
+    return "GB";
+}
+__drv_requiresIRQL(DISPATCH_LEVEL)
+static VOID
+__ReadDiskInfo(
+    __in  PXENVBD_FRONTEND        Frontend
+    )
+{
+    BOOLEAN     Updated = FALSE;
+
+    Frontend->DiskInfo.DiskInfo     = __ReadValue32(Frontend, "info", 
+                                                    Frontend->DiskInfo.DiskInfo, &Updated);
+    Frontend->DiskInfo.SectorSize   = __ReadValue32(Frontend, "sector-size", 
+                                                    Frontend->DiskInfo.SectorSize, &Updated);
+    Frontend->DiskInfo.SectorCount  = __ReadValue64(Frontend, "sectors", 
+                                                    Frontend->DiskInfo.SectorCount, &Updated);
+
+    if (Updated) {
+        if (Frontend->DiskInfo.DiskInfo & VDISK_READONLY) {
+            Warning("Target[%d] : DiskInfo contains VDISK_READONLY flag!\n", Frontend->TargetId);
+        }
+        if (Frontend->DiskInfo.DiskInfo & VDISK_CDROM) {
+            Warning("Target[%d] : DiskInfo contains VDISK_CDROM flag!\n", Frontend->TargetId);
+        }
+        if (Frontend->DiskInfo.SectorSize == 0) {
+            Error("Target[%d] : Invalid SectorSize!\n", Frontend->TargetId);
+        }
+        if (Frontend->DiskInfo.SectorCount == 0) {
+            Error("Target[%d] : Invalid SectorCount!\n", Frontend->TargetId);
+        }
+
+        // dump actual values
+        Verbose("Target[%d] : %lld sectors of %d bytes\n", Frontend->TargetId,
+                    Frontend->DiskInfo.SectorCount, Frontend->DiskInfo.SectorSize);
+        Verbose("Target[%d] : %d %s (%08x) %s\n", Frontend->TargetId,
+                    __Size(&Frontend->DiskInfo), __Units(&Frontend->DiskInfo),
+                    Frontend->DiskInfo.DiskInfo, 
+                    Frontend->Caps.SurpriseRemovable ? "SURPRISE_REMOVABLE" : "");
+    }
+}
+
 //=============================================================================
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static NTSTATUS
@@ -1127,24 +937,23 @@ FrontendClose(
     // dont try to queue the DPC when the lock is dropped
     KeRemoveQueueDpc(&Frontend->EvtchnDpc);
 
-    // unwatch backend
-    if (Frontend->BackendStateWatch) {
+    // unwatch backend (null check for initial close operation)
+    if (Frontend->BackendStateWatch)
         STORE(Unwatch, Frontend->Store, Frontend->BackendStateWatch);
-        Frontend->BackendStateWatch = NULL;
-    }
-    if (Frontend->BackendInfoWatch) {
+    Frontend->BackendStateWatch = NULL;
+    
+    if (Frontend->BackendInfoWatch)
         STORE(Unwatch, Frontend->Store, Frontend->BackendInfoWatch);
-        Frontend->BackendInfoWatch = NULL;
-    }
-    if (Frontend->BackendSectorSizeWatch) {
+    Frontend->BackendInfoWatch = NULL;
+    
+    if (Frontend->BackendSectorSizeWatch)
         STORE(Unwatch, Frontend->Store, Frontend->BackendSectorSizeWatch);
-        Frontend->BackendSectorSizeWatch = NULL;
-    }
-    if (Frontend->BackendSectorCountWatch) {
+    Frontend->BackendSectorSizeWatch = NULL;
+    
+    if (Frontend->BackendSectorCountWatch)
         STORE(Unwatch, Frontend->Store, Frontend->BackendSectorCountWatch);
-        Frontend->BackendSectorCountWatch = NULL;
-    }
-
+    Frontend->BackendSectorCountWatch = NULL;
+    
     Frontend->BackendId = DOMID_INVALID;
 
     // get/update backend path
@@ -1200,7 +1009,7 @@ FrontendPrepare(
     )
 {
     NTSTATUS        Status;
-    XenbusState    BackendState;
+    XenbusState     BackendState;
 
     // get/update backend path
     Status = __UpdateBackendPath(Frontend);
@@ -1208,52 +1017,57 @@ FrontendPrepare(
         goto fail1;
 
     // watch backend (4 paths needed)
-    if (Frontend->BackendStateWatch == NULL) {
-        Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "state",
-                        Frontend->BackendEvent, &Frontend->BackendStateWatch);
-        if (!NT_SUCCESS(Status))
-            goto fail1;
-    }
-    if (Frontend->BackendInfoWatch == NULL) {
-        Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "info",
-                        Frontend->BackendEvent, &Frontend->BackendInfoWatch);
-        if (!NT_SUCCESS(Status))
-            goto fail1;
-    }
-    if (Frontend->BackendSectorSizeWatch == NULL) {
-        Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "sector-size",
-                        Frontend->BackendEvent, &Frontend->BackendSectorSizeWatch);
-        if (!NT_SUCCESS(Status))
-            goto fail1;
-    }
-    if (Frontend->BackendSectorCountWatch == NULL) {
-        Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "sectors",
-                        Frontend->BackendEvent, &Frontend->BackendSectorCountWatch);
-        if (!NT_SUCCESS(Status))
-            goto fail1;
-    }
-
-    // write targetpath
-    Status = __WriteTargetPath(Frontend);
+    Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "state",
+                    Frontend->BackendEvent, &Frontend->BackendStateWatch);
     if (!NT_SUCCESS(Status))
         goto fail2;
+
+    Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "info",
+                    Frontend->BackendEvent, &Frontend->BackendInfoWatch);
+    if (!NT_SUCCESS(Status))
+        goto fail3;
+
+    Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "sector-size",
+                    Frontend->BackendEvent, &Frontend->BackendSectorSizeWatch);
+    if (!NT_SUCCESS(Status))
+        goto fail4;
+
+    Status = STORE(Watch, Frontend->Store, Frontend->BackendPath, "sectors",
+                    Frontend->BackendEvent, &Frontend->BackendSectorCountWatch);
+    if (!NT_SUCCESS(Status))
+        goto fail5;
+
+    // write targetpath
+    Status = FrontendWriteUsage(Frontend);
+    if (!NT_SUCCESS(Status))
+        goto fail6;
+
+    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
+                        "frontend", "%s", Frontend->FrontendPath);
+    if (!NT_SUCCESS(Status))
+        goto fail7;
+
+    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
+                        "device", "%u", Frontend->DeviceId);
+    if (!NT_SUCCESS(Status))
+        goto fail8;
 
     // Frontend: -> INITIALIZING
     Status = ___SetState(Frontend, XenbusStateInitialising);
     if (!NT_SUCCESS(Status))
-        goto fail3;
+        goto fail9;
 
     // Backend : -> INITWAIT
     BackendState = XenbusStateUnknown;
     do {
         Status = __WaitState(Frontend, &BackendState);
         if (!NT_SUCCESS(Status))
-            goto fail4;
+            goto fail10;
     } while (BackendState == XenbusStateClosed || 
              BackendState == XenbusStateInitialising);
     Status = STATUS_UNSUCCESSFUL;
     if (BackendState != XenbusStateInitWait)
-        goto fail5;
+        goto fail11;
 
     // read inquiry data
     if (Frontend->Inquiry == NULL)
@@ -1261,7 +1075,14 @@ FrontendPrepare(
     PdoUpdateInquiryData(Frontend, Frontend->Inquiry);
 
     // read features and caps (removable, ring-order, ...)
-    __ReadFeatures(Frontend);
+    Frontend->Caps.Removable        = (__ReadValue32(Frontend, "removable", 0, NULL) == 1);
+    Frontend->Features.Barrier      = (__ReadValue32(Frontend, "feature-barrier", 0, NULL) == 1);
+    Frontend->Features.Discard      = (__ReadValue32(Frontend, "feature-discard", 0, NULL) == 1);
+    Frontend->Features.FlushCache   = (__ReadValue32(Frontend, "feature-flush-cache", 0, NULL) == 1);
+
+    Frontend->RingOrder = __min(__ReadValue32(Frontend, "max-ring-page-order", 0, NULL), 
+                                XENVBD_MAX_RING_PAGE_ORDER);
+
     Verbose("Target[%d] : BackendId=%d, RingOrder=%d, %s %s %s %s\n", 
                 Frontend->TargetId, Frontend->BackendId, Frontend->RingOrder, 
                 Frontend->Caps.Removable ? "REMOVABLE" : "NOT_REMOVABLE",
@@ -1271,33 +1092,36 @@ FrontendPrepare(
     
     return STATUS_SUCCESS;
 
+fail11:
+    Error("Fail11\n");
+fail10:
+    Error("Fail10\n");
+fail9:
+    Error("Fail9\n");
+fail8:
+    Error("Fail8\n");
+fail7:
+    Error("Fail7\n");
+fail6:
+    Error("Fail6\n");
 fail5:
     Error("Fail5\n");
+    (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendSectorCountWatch);
+    Frontend->BackendSectorCountWatch = NULL;
 fail4:
     Error("Fail4\n");
+    (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendSectorSizeWatch);
+    Frontend->BackendSectorSizeWatch = NULL;
 fail3:
     Error("Fail3\n");
+    (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendInfoWatch);
+    Frontend->BackendInfoWatch = NULL;
 fail2:
     Error("Fail2\n");
+    (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendStateWatch);
+    Frontend->BackendStateWatch = NULL;
 fail1:
     Error("Fail1 (%08x)\n", Status);
-
-    if (Frontend->BackendStateWatch) {
-        (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendStateWatch);
-        Frontend->BackendStateWatch = NULL;
-    }
-    if (Frontend->BackendInfoWatch) {
-        (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendInfoWatch);
-        Frontend->BackendInfoWatch = NULL;
-    }
-    if (Frontend->BackendSectorSizeWatch) {
-        (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendSectorSizeWatch);
-        Frontend->BackendSectorSizeWatch = NULL;
-    }
-    if (Frontend->BackendSectorCountWatch) {
-        (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendSectorCountWatch);
-        Frontend->BackendSectorCountWatch = NULL;
-    }
     return Status;
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
@@ -1307,61 +1131,167 @@ FrontendConnect(
     )
 {
     NTSTATUS        Status;
+    ULONG           Index;
     XenbusState     BackendState;
+    const ULONG     RingPages = (1 << Frontend->RingOrder);
 
     // Alloc Ring, Create Evtchn, Gnttab map
-    Status = __AllocRing(Frontend);
-    if (!NT_SUCCESS(Status))
+    Status = STATUS_NO_MEMORY;
+    Frontend->SharedRing = __AllocPages((SIZE_T)RingPages << PAGE_SHIFT, &Frontend->Mdl);
+    if (!Frontend->SharedRing)
         goto fail1;
 
+#pragma warning(push)
+#pragma warning(disable: 4305)
+    SHARED_RING_INIT(Frontend->SharedRing);
+    FRONT_RING_INIT(&Frontend->FrontRing, Frontend->SharedRing, PAGE_SIZE << Frontend->RingOrder);
+#pragma warning(pop)
+
+    // GNTTAB
+    for (Index = 0; Index < RingPages; ++Index) {
+        Status = FrontendGnttabGet(Frontend, 
+                                    __Pfn(Frontend->SharedRing, Index), 
+                                    FALSE, 
+                                    &Frontend->RingGrantRefs[Index]);
+        if (!NT_SUCCESS(Status))
+            goto fail2;
+    }
+
+    // EVTCHN
+    Status = STATUS_INVALID_PARAMETER;
+    Frontend->EvtchnPort = EVTCHN(Open, Frontend->Evtchn, EVTCHN_UNBOUND, EvtchnInterruptFunc,
+                                    Frontend, Frontend->BackendId, TRUE);
+    if (Frontend->EvtchnPort == NULL)
+        goto fail3;
+
+    Frontend->EvtchnPortNumber = EVTCHN(Port, Frontend->Evtchn, Frontend->EvtchnPort);
+    if (EVTCHN(Unmask, Frontend->Evtchn, Frontend->EvtchnPort, FALSE))
+        EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
+
     // write evtchn/gnttab details in xenstore
-    Status = __WriteRing(Frontend);
+    for (;;) {
+        PXENBUS_STORE_TRANSACTION   Transaction;
+        
+        Status = STORE(TransactionStart, Frontend->Store, &Transaction);
+        if (!NT_SUCCESS(Status))
+            break;
+
+        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath, 
+                        "event-channel", "%u", Frontend->EvtchnPortNumber);
+        if (!NT_SUCCESS(Status))
+            goto abort;
+
+        if (Frontend->RingOrder == 0) {
+            Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
+                            "ring-ref", "%u", Frontend->RingGrantRefs[0]);
+            if (!NT_SUCCESS(Status))
+                goto abort;
+        } else {
+            Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath, 
+                            "ring-page-order", "%u", Frontend->RingOrder);
+            if (!NT_SUCCESS(Status))
+                goto abort;
+
+            for (Index = 0; Index < RingPages; ++Index) {
+                PCHAR   RingRefName = DriverFormat("ring-ref%d", Index);
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+                if (RingRefName == NULL)
+                    goto abort;
+
+                Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
+                                RingRefName, "%u", Frontend->RingGrantRefs[Index]);
+                DriverFormatFree(RingRefName);
+                if (!NT_SUCCESS(Status))
+                    goto abort;
+            }
+        }
+
+        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath,
+                        "target-id", "%u", Frontend->TargetId);
+        if (!NT_SUCCESS(Status))
+            goto abort;
+
+        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
+                        "protocol", XEN_IO_PROTO_ABI_NATIVE);
+        if (!NT_SUCCESS(Status))
+            goto abort;
+
+        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
+                        "feature-surprise-remove", "1");
+        if (!NT_SUCCESS(Status))
+            goto abort;
+
+        Status = STORE(Write, Frontend->Store, Transaction, Frontend->FrontendPath,
+                        "feature-online-resize", "1");
+        if (!NT_SUCCESS(Status))
+            goto abort;
+
+        Status = STORE(TransactionEnd, Frontend->Store, Transaction, TRUE);
+        if (Status == STATUS_RETRY)
+            continue;
+
+        break;
+
+abort:
+        (VOID) STORE(TransactionEnd, Frontend->Store, Transaction, FALSE);
+        break;
+    }
     if (!NT_SUCCESS(Status))
-        goto fail2;
+        goto fail4;
 
     // Frontend: -> INITIALIZED
     Status = ___SetState(Frontend, XenbusStateInitialised);
     if (!NT_SUCCESS(Status))
-        goto fail3;
+        goto fail5;
 
     // Backend : -> CONNECTED
     BackendState = XenbusStateUnknown;
     do {
         Status = __WaitState(Frontend, &BackendState);
         if (!NT_SUCCESS(Status))
-            goto fail4;
+            goto fail6;
     } while (BackendState == XenbusStateInitWait ||
              BackendState == XenbusStateInitialising ||
              BackendState == XenbusStateInitialised);
     Status = STATUS_UNSUCCESSFUL;
     if (BackendState != XenbusStateConnected)
-        goto fail5;
+        goto fail7;
 
     // Frontend: -> CONNECTED
     Status = ___SetState(Frontend, XenbusStateConnected);
     if (!NT_SUCCESS(Status))
-        goto fail6;
+        goto fail8;
 
     // read disk info
     __ReadDiskInfo(Frontend);
-    Verbose("Target[%d] : %lld sectors of %d bytes (%lld MB), Info %08x %s\n", Frontend->TargetId,
-                Frontend->DiskInfo.SectorCount, Frontend->DiskInfo.SectorSize,
-                (Frontend->DiskInfo.SectorSize * Frontend->DiskInfo.SectorCount) / (1024 * 1024),
-                Frontend->DiskInfo.DiskInfo, Frontend->Caps.SurpriseRemovable ? "SURPRISE_REMOVABLE" : "");
-    
     return STATUS_SUCCESS;
 
+fail8:
+    Error("Fail8\n");
+fail7:
+    Error("Fail7\n");
 fail6:
     Error("Fail6\n");
 fail5:
     Error("Fail5\n");
 fail4:
     Error("Fail4\n");
+    EVTCHN(Close, Frontend->Evtchn, Frontend->EvtchnPort);
+    Frontend->EvtchnPort = NULL;
+    Frontend->EvtchnPortNumber = 0;
 fail3:
     Error("Fail3\n");
 fail2:
     Error("Fail2\n");
-    __FreeRing(Frontend);
+    for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
+        if (Frontend->RingGrantRefs[Index] != 0)
+            FrontendGnttabPut(Frontend, Frontend->RingGrantRefs[Index]);
+        Frontend->RingGrantRefs[Index] = 0;
+    }
+    RtlZeroMemory(&Frontend->FrontRing, sizeof(Frontend->FrontRing));
+    __FreePages(Frontend->SharedRing, Frontend->Mdl);
+    Frontend->SharedRing = NULL;
+    Frontend->Mdl = NULL;
 fail1:
     Error("Fail1 (%08x)\n", Status);
     return Status;
@@ -1372,7 +1302,25 @@ FrontendDisconnect(
     __in  PXENVBD_FRONTEND        Frontend
     )
 {
-    __FreeRing(Frontend);
+    ULONG   Index;
+
+    // EVTCHN
+    EVTCHN(Close, Frontend->Evtchn, Frontend->EvtchnPort);
+    Frontend->EvtchnPort = NULL;
+    Frontend->EvtchnPortNumber = 0;
+
+    // GNTTAB
+    for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
+        if (Frontend->RingGrantRefs[Index] != 0)
+            FrontendGnttabPut(Frontend, Frontend->RingGrantRefs[Index]);
+        Frontend->RingGrantRefs[Index] = 0;
+    }
+
+    // SharedRing
+    RtlZeroMemory(&Frontend->FrontRing, sizeof(Frontend->FrontRing));
+    __FreePages(Frontend->SharedRing, Frontend->Mdl);
+    Frontend->SharedRing = NULL;
+    Frontend->Mdl = NULL;
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static FORCEINLINE VOID
@@ -1395,242 +1343,7 @@ FrontendDisable(
 }
 
 //=============================================================================
-static DECLSPEC_NOINLINE NTSTATUS
-__FrontendSetState(
-    __in  PXENVBD_FRONTEND        Frontend,
-    __in  XENVBD_STATE            State
-    );
-
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static VOID
-FrontendSuspendLateCallback(
-    __in  PVOID                   Argument
-    )
-{
-    NTSTATUS            Status;
-    XENVBD_STATE        State;
-    PXENVBD_FRONTEND    Frontend = (PXENVBD_FRONTEND)Argument;
-
-    Verbose("Target[%d] : ===> from %s\n", Frontend->TargetId, __XenvbdStateName(Frontend->State));
-    State = Frontend->State;
-
-    PdoPreResume(Frontend->Pdo);
-
-    // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
-    Status = __FrontendSetState(Frontend, XENVBD_CLOSED);
-    if (!NT_SUCCESS(Status)) {
-        Error("Target[%d] : SetState CLOSED (%08x)\n", Frontend->TargetId, Status);
-        ASSERT(FALSE);
-    }
-
-    // reset some stats - previous values are just not relevant any more
-    Verbose("Target[%d] : ResetFrom: %d NumEvents, %d NumDpcs\n", 
-                Frontend->TargetId, Frontend->NumEvents, Frontend->NumDpcs);
-    Verbose("Target[%d] : ResetFrom: %d Outstanding, %d Submitted, %d Recieved\n", 
-                Frontend->TargetId, Frontend->RequestsOutstanding, 
-                Frontend->RequestsSubmitted, Frontend->ResponsesRecieved);
-
-    Frontend->NumEvents = Frontend->NumDpcs = 0;
-    Frontend->RequestsOutstanding = Frontend->RequestsSubmitted = Frontend->ResponsesRecieved = 0;
-
-    // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
-    Status = __FrontendSetState(Frontend, State);
-    if (!NT_SUCCESS(Status)) {
-        Error("Target[%d] : SetState %s (%08x)\n", Frontend->TargetId, __XenvbdStateName(State), Status);
-        ASSERT(FALSE);
-    }
-
-    PdoPostResume(Frontend->Pdo);
-    EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
-
-    Verbose("Target[%d] : <=== restored %s\n", Frontend->TargetId, __XenvbdStateName(Frontend->State));
-}
-//=============================================================================
 // Init/Term
-__checkReturn
-NTSTATUS
-FrontendCreate(
-    __in  PXENVBD_PDO             Pdo,
-    __in  PCHAR                   DeviceId, 
-    __in  ULONG                   TargetId, 
-    __in  PKEVENT                 Event,
-    __out PXENVBD_FRONTEND*       _Frontend
-    )
-{
-    NTSTATUS            Status;
-    PXENVBD_FRONTEND    Frontend;
-
-    Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
-
-    Frontend = __FrontendAlloc(sizeof(XENVBD_FRONTEND));
-
-    Status = STATUS_NO_MEMORY;
-    if (Frontend == NULL)
-        goto fail1;
-
-    // populate members
-    Frontend->Pdo = Pdo;
-    Frontend->TargetId = TargetId;
-    Frontend->DeviceId = strtoul(DeviceId, NULL, 10);
-    Frontend->State = XENVBD_INITIALIZED;
-    Frontend->DiskInfo.SectorSize = 512; // default sector size
-    Frontend->BackendId = DOMID_INVALID;
-    Frontend->BackendEvent = Event;
-    
-    Status = STATUS_INSUFFICIENT_RESOURCES;
-    Frontend->FrontendPath = DriverFormat("device/%s/%s", FdoEnum(PdoGetFdo(Pdo)), DeviceId);
-    if (Frontend->FrontendPath == NULL) 
-        goto fail2;
-
-    Frontend->TargetPath = DriverFormat("data/scsi/target/%d", TargetId);
-    if (Frontend->TargetPath == NULL)
-        goto fail3;
-
-    // kernel objects
-    KeInitializeSpinLock(&Frontend->StateLock);
-    KeInitializeSpinLock(&Frontend->RingLock);
-    KeInitializeDpc(&Frontend->EvtchnDpc, EvtchnDpcFunc, Frontend);
-
-    Trace("Target[%d] @ (%d) <===== (STATUS_SUCCESS)\n", Frontend->TargetId, KeGetCurrentIrql());
-    *_Frontend = Frontend;
-    return STATUS_SUCCESS;
-
-fail3:
-    Error("fail3\n");
-    DriverFormatFree(Frontend->FrontendPath);
-    Frontend->FrontendPath = NULL;
-fail2:
-    Error("Fail2\n");
-    __FrontendFree(Frontend);
-fail1:
-    Error("Fail1 (%08x)\n", Status);
-    *_Frontend = NULL;
-    return Status;
-}
-
-VOID
-FrontendDestroy(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    const ULONG TargetId = Frontend->TargetId;
-
-    Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
-
-    PdoFreeInquiryData(Frontend->Inquiry);
-    Frontend->Inquiry = NULL;
-
-    DriverFormatFree(Frontend->TargetPath);
-    Frontend->TargetPath = NULL;
-
-    DriverFormatFree(Frontend->FrontendPath);
-    Frontend->FrontendPath = NULL;
-
-    ASSERT3P(Frontend->BackendPath, ==, NULL);
-    ASSERT3P(Frontend->Inquiry, ==, NULL);
-    ASSERT3P(Frontend->SuspendLateCallback, ==, NULL);
-    ASSERT3P(Frontend->SharedRing, ==, NULL);
-    ASSERT3U(Frontend->RingGrantRefs[0], ==, 0); // only ASSERTing on 1st entry
-    ASSERT3P(Frontend->EvtchnPort, ==, NULL);
-    ASSERT3P(Frontend->BackendStateWatch, ==, NULL);
-    ASSERT3P(Frontend->BackendInfoWatch, ==, NULL);
-    ASSERT3P(Frontend->BackendSectorSizeWatch, ==, NULL);
-    ASSERT3P(Frontend->BackendSectorCountWatch, ==, NULL);
-
-    __FrontendFree(Frontend);
-    Trace("Target[%d] @ (%d) <=====\n", TargetId, KeGetCurrentIrql());
-}
-
-__checkReturn
-__drv_maxIRQL(DISPATCH_LEVEL)
-NTSTATUS
-FrontendD3ToD0(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    NTSTATUS    Status;
-    KIRQL       Irql;
-
-    KeAcquireSpinLock(&Frontend->StateLock, &Irql);
-
-    // acquire interfaces
-    Frontend->Store   = FdoAcquireStore(PdoGetFdo(Frontend->Pdo));
-    Frontend->Evtchn  = FdoAcquireEvtchn(PdoGetFdo(Frontend->Pdo));
-    Frontend->Gnttab  = FdoAcquireGnttab(PdoGetFdo(Frontend->Pdo));
-    Frontend->Suspend = FdoAcquireSuspend(PdoGetFdo(Frontend->Pdo));
-
-    // register suspend callback
-    ASSERT3P(Frontend->SuspendLateCallback, ==, NULL);
-    Status = SUSPEND(Register, Frontend->Suspend, SUSPEND_CALLBACK_LATE,
-                    FrontendSuspendLateCallback, Frontend, &Frontend->SuspendLateCallback);
-    if (!NT_SUCCESS(Status))
-        goto fail1;
-
-    // update state
-    Frontend->Active = TRUE;
-
-    KeReleaseSpinLock(&Frontend->StateLock, Irql);
-    return STATUS_SUCCESS;
-
-fail1:
-    Error("Fail1 (%08x)\n", Status);
-
-    SUSPEND(Release, Frontend->Suspend);
-    Frontend->Suspend = NULL;
-    
-    GNTTAB(Release, Frontend->Gnttab);
-    Frontend->Gnttab = NULL;
-    
-    EVTCHN(Release, Frontend->Evtchn);
-    Frontend->Evtchn = NULL;
-    
-    STORE(Release, Frontend->Store);
-    Frontend->Store = NULL;
-
-    KeReleaseSpinLock(&Frontend->StateLock, Irql);
-    return Status;
-}
-
-__drv_maxIRQL(DISPATCH_LEVEL)
-VOID
-FrontendD0ToD3(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    KIRQL       Irql;
-
-    KeAcquireSpinLock(&Frontend->StateLock, &Irql);
-
-    // update state
-    Frontend->Active = FALSE;
-
-    // deregister suspend callback
-    if (Frontend->SuspendLateCallback != NULL) {
-        SUSPEND(Deregister, Frontend->Suspend, Frontend->SuspendLateCallback);
-        Frontend->SuspendLateCallback = NULL;
-    }
-    // Free backend path before dropping store interface
-    if (Frontend->BackendPath) {
-        __FrontendFree(Frontend->BackendPath);
-        Frontend->BackendPath = NULL;
-    }
-
-    // release interfaces
-    SUSPEND(Release, Frontend->Suspend);
-    Frontend->Suspend = NULL;
-    
-    GNTTAB(Release, Frontend->Gnttab);
-    Frontend->Gnttab = NULL;
-    
-    EVTCHN(Release, Frontend->Evtchn);
-    Frontend->Evtchn = NULL;
-    
-    STORE(Release, Frontend->Store);
-    Frontend->Store = NULL;
-
-    KeReleaseSpinLock(&Frontend->StateLock, Irql);
-}
-
 static DECLSPEC_NOINLINE NTSTATUS
 __FrontendSetState(
     __in  PXENVBD_FRONTEND        Frontend,
@@ -1770,6 +1483,141 @@ __FrontendSetState(
     return Failed ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
 }
 
+__drv_requiresIRQL(DISPATCH_LEVEL)
+static DECLSPEC_NOINLINE VOID
+FrontendSuspendLateCallback(
+    __in  PVOID                   Argument
+    )
+{
+    NTSTATUS            Status;
+    XENVBD_STATE        State;
+    PXENVBD_FRONTEND    Frontend = (PXENVBD_FRONTEND)Argument;
+
+    Verbose("Target[%d] : ===> from %s\n", Frontend->TargetId, __XenvbdStateName(Frontend->State));
+    State = Frontend->State;
+
+    PdoPreResume(Frontend->Pdo);
+
+    // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
+    Status = __FrontendSetState(Frontend, XENVBD_CLOSED);
+    if (!NT_SUCCESS(Status)) {
+        Error("Target[%d] : SetState CLOSED (%08x)\n", Frontend->TargetId, Status);
+        ASSERT(FALSE);
+    }
+
+    // reset some stats - previous values are just not relevant any more
+    Verbose("Target[%d] : ResetFrom: %d NumEvents, %d NumDpcs\n", 
+                Frontend->TargetId, Frontend->NumEvents, Frontend->NumDpcs);
+    Verbose("Target[%d] : ResetFrom: %d Outstanding, %d Submitted, %d Recieved\n", 
+                Frontend->TargetId, Frontend->RequestsOutstanding, 
+                Frontend->RequestsSubmitted, Frontend->ResponsesRecieved);
+
+    Frontend->NumEvents = Frontend->NumDpcs = 0;
+    Frontend->RequestsOutstanding = Frontend->RequestsSubmitted = Frontend->ResponsesRecieved = 0;
+
+    // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
+    Status = __FrontendSetState(Frontend, State);
+    if (!NT_SUCCESS(Status)) {
+        Error("Target[%d] : SetState %s (%08x)\n", Frontend->TargetId, __XenvbdStateName(State), Status);
+        ASSERT(FALSE);
+    }
+
+    PdoPostResume(Frontend->Pdo);
+    EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
+
+    Verbose("Target[%d] : <=== restored %s\n", Frontend->TargetId, __XenvbdStateName(Frontend->State));
+}
+
+__checkReturn
+__drv_maxIRQL(DISPATCH_LEVEL)
+NTSTATUS
+FrontendD3ToD0(
+    __in  PXENVBD_FRONTEND        Frontend
+    )
+{
+    NTSTATUS    Status;
+    KIRQL       Irql;
+
+    KeAcquireSpinLock(&Frontend->StateLock, &Irql);
+
+    // acquire interfaces
+    Frontend->Store   = FdoAcquireStore(PdoGetFdo(Frontend->Pdo));
+    Frontend->Evtchn  = FdoAcquireEvtchn(PdoGetFdo(Frontend->Pdo));
+    Frontend->Gnttab  = FdoAcquireGnttab(PdoGetFdo(Frontend->Pdo));
+    Frontend->Suspend = FdoAcquireSuspend(PdoGetFdo(Frontend->Pdo));
+
+    // register suspend callback
+    ASSERT3P(Frontend->SuspendLateCallback, ==, NULL);
+    Status = SUSPEND(Register, Frontend->Suspend, SUSPEND_CALLBACK_LATE,
+                    FrontendSuspendLateCallback, Frontend, &Frontend->SuspendLateCallback);
+    if (!NT_SUCCESS(Status))
+        goto fail1;
+
+    // update state
+    Frontend->Active = TRUE;
+
+    KeReleaseSpinLock(&Frontend->StateLock, Irql);
+    return STATUS_SUCCESS;
+
+fail1:
+    Error("Fail1 (%08x)\n", Status);
+
+    SUSPEND(Release, Frontend->Suspend);
+    Frontend->Suspend = NULL;
+    
+    GNTTAB(Release, Frontend->Gnttab);
+    Frontend->Gnttab = NULL;
+    
+    EVTCHN(Release, Frontend->Evtchn);
+    Frontend->Evtchn = NULL;
+    
+    STORE(Release, Frontend->Store);
+    Frontend->Store = NULL;
+
+    KeReleaseSpinLock(&Frontend->StateLock, Irql);
+    return Status;
+}
+
+__drv_maxIRQL(DISPATCH_LEVEL)
+VOID
+FrontendD0ToD3(
+    __in  PXENVBD_FRONTEND        Frontend
+    )
+{
+    KIRQL       Irql;
+
+    KeAcquireSpinLock(&Frontend->StateLock, &Irql);
+
+    // update state
+    Frontend->Active = FALSE;
+
+    // deregister suspend callback
+    if (Frontend->SuspendLateCallback != NULL) {
+        SUSPEND(Deregister, Frontend->Suspend, Frontend->SuspendLateCallback);
+        Frontend->SuspendLateCallback = NULL;
+    }
+    // Free backend path before dropping store interface
+    if (Frontend->BackendPath) {
+        __FrontendFree(Frontend->BackendPath);
+        Frontend->BackendPath = NULL;
+    }
+
+    // release interfaces
+    SUSPEND(Release, Frontend->Suspend);
+    Frontend->Suspend = NULL;
+    
+    GNTTAB(Release, Frontend->Gnttab);
+    Frontend->Gnttab = NULL;
+    
+    EVTCHN(Release, Frontend->Evtchn);
+    Frontend->Evtchn = NULL;
+    
+    STORE(Release, Frontend->Store);
+    Frontend->Store = NULL;
+
+    KeReleaseSpinLock(&Frontend->StateLock, Irql);
+}
+
 __checkReturn
 NTSTATUS
 FrontendSetState(
@@ -1797,48 +1645,103 @@ FrontendBackendPathChanged(
     // Only attempt this if Active, Active is set/cleared on D3->D0/D0->D3
     if (Frontend->Active) {
         // Note: Nothing may have changed with this target, this could be caused by another target changing
-        if (__ReadDiskInfo(Frontend)) {
-            Verbose("Target[%d] : %lld sectors of %d bytes (%lld MB), Info %08x %s\n", Frontend->TargetId,
-                        Frontend->DiskInfo.SectorCount, Frontend->DiskInfo.SectorSize,
-                        (Frontend->DiskInfo.SectorSize * Frontend->DiskInfo.SectorCount) / (1024 * 1024),
-                        Frontend->DiskInfo.DiskInfo, Frontend->Caps.SurpriseRemovable ? "SURPRISE_REMOVABLE" : "");
-        }
+        __ReadDiskInfo(Frontend);
         __CheckBackendForEject(Frontend);
     }
 }
 
-//=============================================================================
-// Writing
-__drv_maxIRQL(DISPATCH_LEVEL)
+__checkReturn
 NTSTATUS
-FrontendWriteUsage(
+FrontendCreate(
+    __in  PXENVBD_PDO             Pdo,
+    __in  PCHAR                   DeviceId, 
+    __in  ULONG                   TargetId, 
+    __in  PKEVENT                 Event,
+    __out PXENVBD_FRONTEND*       _Frontend
+    )
+{
+    NTSTATUS            Status;
+    PXENVBD_FRONTEND    Frontend;
+
+    Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
+
+    Frontend = __FrontendAlloc(sizeof(XENVBD_FRONTEND));
+
+    Status = STATUS_NO_MEMORY;
+    if (Frontend == NULL)
+        goto fail1;
+
+    // populate members
+    Frontend->Pdo = Pdo;
+    Frontend->TargetId = TargetId;
+    Frontend->DeviceId = strtoul(DeviceId, NULL, 10);
+    Frontend->State = XENVBD_INITIALIZED;
+    Frontend->DiskInfo.SectorSize = 512; // default sector size
+    Frontend->BackendId = DOMID_INVALID;
+    Frontend->BackendEvent = Event;
+    
+    Status = STATUS_INSUFFICIENT_RESOURCES;
+    Frontend->FrontendPath = DriverFormat("device/%s/%s", FdoEnum(PdoGetFdo(Pdo)), DeviceId);
+    if (Frontend->FrontendPath == NULL) 
+        goto fail2;
+
+    Frontend->TargetPath = DriverFormat("data/scsi/target/%d", TargetId);
+    if (Frontend->TargetPath == NULL)
+        goto fail3;
+
+    // kernel objects
+    KeInitializeSpinLock(&Frontend->StateLock);
+    KeInitializeSpinLock(&Frontend->RingLock);
+    KeInitializeDpc(&Frontend->EvtchnDpc, EvtchnDpcFunc, Frontend);
+
+    Trace("Target[%d] @ (%d) <===== (STATUS_SUCCESS)\n", Frontend->TargetId, KeGetCurrentIrql());
+    *_Frontend = Frontend;
+    return STATUS_SUCCESS;
+
+fail3:
+    Error("fail3\n");
+    DriverFormatFree(Frontend->FrontendPath);
+    Frontend->FrontendPath = NULL;
+fail2:
+    Error("Fail2\n");
+    __FrontendFree(Frontend);
+fail1:
+    Error("Fail1 (%08x)\n", Status);
+    *_Frontend = NULL;
+    return Status;
+}
+
+VOID
+FrontendDestroy(
     __in  PXENVBD_FRONTEND        Frontend
     )
 {
-    NTSTATUS    Status;
+    const ULONG TargetId = Frontend->TargetId;
 
-    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
-                        "paging", "%u", Frontend->Caps.Paging);
-    if (!NT_SUCCESS(Status))
-        goto out;
+    Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
 
-    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
-                        "hibernation", "%u", Frontend->Caps.Hibernation);
-    if (!NT_SUCCESS(Status))
-        goto out;
+    PdoFreeInquiryData(Frontend->Inquiry);
+    Frontend->Inquiry = NULL;
 
-    Status = STORE(Printf, Frontend->Store, NULL, Frontend->TargetPath, 
-                        "dump", "%u", Frontend->Caps.DumpFile);
-    if (!NT_SUCCESS(Status))
-        goto out;
+    DriverFormatFree(Frontend->TargetPath);
+    Frontend->TargetPath = NULL;
 
-    Verbose("Target[%d] : %s %s %s\n", Frontend->TargetId,
-                    Frontend->Caps.DumpFile ? "DUMP" : "NOT_DUMP", 
-                    Frontend->Caps.Hibernation ? "HIBER" : "NOT_HIBER",
-                    Frontend->Caps.Paging ? "PAGE" : "NOT_PAGE");
+    DriverFormatFree(Frontend->FrontendPath);
+    Frontend->FrontendPath = NULL;
 
-out:
-    return Status;
+    ASSERT3P(Frontend->BackendPath, ==, NULL);
+    ASSERT3P(Frontend->Inquiry, ==, NULL);
+    ASSERT3P(Frontend->SuspendLateCallback, ==, NULL);
+    ASSERT3P(Frontend->SharedRing, ==, NULL);
+    ASSERT3U(Frontend->RingGrantRefs[0], ==, 0); // only ASSERTing on 1st entry
+    ASSERT3P(Frontend->EvtchnPort, ==, NULL);
+    ASSERT3P(Frontend->BackendStateWatch, ==, NULL);
+    ASSERT3P(Frontend->BackendInfoWatch, ==, NULL);
+    ASSERT3P(Frontend->BackendSectorSizeWatch, ==, NULL);
+    ASSERT3P(Frontend->BackendSectorCountWatch, ==, NULL);
+
+    __FrontendFree(Frontend);
+    Trace("Target[%d] @ (%d) <=====\n", TargetId, KeGetCurrentIrql());
 }
 
 //=============================================================================
