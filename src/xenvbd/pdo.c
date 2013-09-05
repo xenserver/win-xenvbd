@@ -34,7 +34,6 @@
 #include "fdo.h"
 #include "frontend.h"
 #include "queue.h"
-#include "ring.h"
 #include "srbext.h"
 #include "buffer.h"
 #include "pdo-inquiry.h"

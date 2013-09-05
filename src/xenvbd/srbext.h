@@ -34,18 +34,41 @@
 
 #include <wdm.h>
 #include <xenvbd-storport.h>
+#include <xen.h>
 #include "assert.h"
 
+// Segments - extension of blkif_segment_t
+typedef struct _XENVBD_SEGMENT {
+    ULONG               GrantRef;
+    UCHAR               FirstSector;
+    UCHAR               LastSector;
+
+    PVOID               BufferId;
+    PVOID               Buffer; // VirtAddr mapped to PhysAddr(s)
+    ULONG               Length;
+    MDL                 Mdl;
+    PFN_NUMBER          Pfn[2];
+} XENVBD_SEGMENT, *PXENVBD_SEGMENT;
+
+// Request - extension of blkif_request_t
+typedef struct _XENVBD_REQUEST {
+    LIST_ENTRY          Entry;          // XENVBD_SRBEXT.RequestList (list item)
+    PSCSI_REQUEST_BLOCK Srb;            // XENVBD_SRBEXT.Srb
+
+    UCHAR               Operation;
+    UCHAR               NrSegments;
+    ULONG64             FirstSector;
+    ULONG64             NrSectors;
+    XENVBD_SEGMENT      Segments[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+} XENVBD_REQUEST, *PXENVBD_REQUEST;
+
+// SRBExtension - context for SRBs
 typedef struct _XENVBD_SRBEXT {
-    PSCSI_REQUEST_BLOCK     Srb;
-
-    // SrbQueue
-    PVOID                   QueueHead;
-    LIST_ENTRY              QueueEntry;
-
-    // Requests
-    LIST_ENTRY              RequestList;
-    LONG                    RequestSize;
+    PSCSI_REQUEST_BLOCK     Srb;        // Srb->SrbExtension == this
+    PVOID                   QueueHead;  // -> SRB_QUEUE
+    LIST_ENTRY              QueueEntry; // -> SRB_QUEUE.List (list item)
+    LIST_ENTRY              RequestList;// -> XENVBD_REQUEST.Entry (list head)
+    LONG                    RequestSize;// (list size)
 } XENVBD_SRBEXT, *PXENVBD_SRBEXT;
 
 FORCEINLINE PXENVBD_SRBEXT
