@@ -532,37 +532,30 @@ __FdoIsPdoMasked(
     __in ULONG                       Target
     )
 {
-    PCHAR       TargetId;
-    BOOLEAN     EmulatedPresent;
-
-    switch (Target) {
-    case 0:     TargetId = "0";     break;
-    case 1:     TargetId = "1";     break;
-    case 2:     TargetId = "2";     break;
-    case 3:     TargetId = "3";     break;
-    default:    
+    // Only check targets that could be emulated
+    if (Target > 3) {
         Verbose("Target[%d] : (%s/%s) Emulated NOT_APPLICABLE (non-IDE device)\n", 
                             Target, Enumerator, Device);
-        EmulatedPresent = FALSE;
-        goto done;          
-        break;
+        return FALSE;
     }
-
-    EmulatedPresent = TRUE;
+     
+    // Check presense of Emulated interface. Absence indicates emulated cannot be unplugged
     if (Fdo->Emulated == NULL) {
         Warning("Target[%d] : (%s/%s) Emulated NOT_KNOWN (assumed PRESENT)\n", 
                             Target, Enumerator, Device);
-        goto done;
+        return TRUE;
     }
 
-    // ask XENFILT whats going on
-    EmulatedPresent = EMULATED(IsPresent, Fdo->Emulated, Enumerator, TargetId);
-
-    Verbose("Target[%d] : (%s/%s) Emulated %s\n", Target, Enumerator, Device, 
-            EmulatedPresent ? "PRESENT" : "UNPLUGGED");
-
-done:
-    return !EmulatedPresent;
+    // Ask XenFilt if Ctrlr(0), Target(Target), Lun(0) is present
+    if (EMULATED(IsDiskPresent, Fdo->Emulated, 0, Target, 0)) {
+        Verbose("Target[%d] : (%s/%s) Emulated PRESENT\n", 
+                            Target, Enumerator, Device);
+        return TRUE;
+    } else {
+        Verbose("Target[%d] : (%s/%s) Emulated NOT_PRESENT\n", 
+                            Target, Enumerator, Device);
+        return FALSE;
+    }
 }
 __checkReturn
 static FORCEINLINE BOOLEAN
