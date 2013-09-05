@@ -33,8 +33,8 @@
 #define _XENVBD_BUFFER_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
-#include "..\..\include\debug_interface.h"
+#include <xenvbd-storport.h>
+#include <debug_interface.h>
 
 extern VOID
 BufferInitialize(

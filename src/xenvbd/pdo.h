@@ -35,11 +35,11 @@
 typedef struct _XENVBD_PDO XENVBD_PDO, *PXENVBD_PDO;
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 #include "fdo.h"
 #include "ring.h"
 #include "types.h"
-#include "..\..\include\debug_interface.h"
+#include <debug_interface.h>
 
 extern VOID
 PdoDebugCallback(

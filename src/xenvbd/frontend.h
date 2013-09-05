@@ -33,7 +33,7 @@
 #define _XENVBD_FRONTEND_H
 
 #include "pdo.h"
-#include "..\..\include\debug_interface.h"
+#include <debug_interface.h>
 
 typedef enum _XENVBD_STATE {
     XENVBD_STATE_INVALID,

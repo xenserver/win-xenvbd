@@ -33,8 +33,8 @@
 #define _XENVBD_QUEUE_H
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
-#include "..\..\include\debug_interface.h"
+#include <xenvbd-storport.h>
+#include <debug_interface.h>
 
 typedef struct _SRB_QUEUE {
     KSPIN_LOCK          Lock;

@@ -37,10 +37,10 @@
 #include "debug.h"
 #include "assert.h"
 #include "util.h"
-#include "..\..\include\version.h"
-#include "..\..\include\names.h"
-#include "..\..\include\xencrsh_interface.h"
-#include "..\..\include\xenvbd-ntstrsafe.h"
+#include <version.h>
+#include <names.h>
+#include <xencrsh_interface.h>
+#include <xenvbd-ntstrsafe.h>
 
 #define IS_NULL         ((ULONG)'llun')
 #define IS_FDO          ((ULONG)'odf')

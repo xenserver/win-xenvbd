@@ -38,10 +38,10 @@
 #include "assert.h"
 #include "util.h"
 #include "names.h"
-#include "..\..\include\store_interface.h"
-#include "..\..\include\evtchn_interface.h"
-#include "..\..\include\gnttab_interface.h"
-#include "..\..\include\suspend_interface.h"
+#include <store_interface.h>
+#include <evtchn_interface.h>
+#include <gnttab_interface.h>
+#include <suspend_interface.h>
 
 #include <stdlib.h>
 

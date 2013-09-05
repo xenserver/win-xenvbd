@@ -35,13 +35,13 @@
 typedef struct _XENVBD_FDO XENVBD_FDO, *PXENVBD_FDO;
 
 #include <wdm.h>
-#include "..\..\include\xenvbd-storport.h"
+#include <xenvbd-storport.h>
 #include "pdo.h"
-#include "..\..\include\store_interface.h"
-#include "..\..\include\evtchn_interface.h"
-#include "..\..\include\gnttab_interface.h"
-#include "..\..\include\debug_interface.h"
-#include "..\..\include\suspend_interface.h"
+#include <store_interface.h>
+#include <evtchn_interface.h>
+#include <gnttab_interface.h>
+#include <debug_interface.h>
+#include <suspend_interface.h>
 
 // Reference Counting
 extern LONG

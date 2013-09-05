@@ -32,7 +32,7 @@
 #ifndef _XENVBD_RING_H
 #define _XENVBD_RING_H
 
-#include "..\..\include\xen.h"
+#include <xen.h>
 
 typedef struct _XENVBD_SEGMENT {
     ULONG               GrantRef;

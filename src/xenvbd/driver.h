@@ -33,7 +33,7 @@
 #define _XENVBD_XENVBD_H
 
 #include "fdo.h"
-#include "..\..\include\xen.h"
+#include <xen.h>
 
 // Global Constants
 #define XENVBD_MAX_TARGETS              (255)

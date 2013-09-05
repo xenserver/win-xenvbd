@@ -41,13 +41,13 @@
 #include "debug.h"
 #include "assert.h"
 #include "util.h"
-#include "..\..\include\xencdb.h"
-#include "..\..\include\names.h"
-#include "..\..\include\store_interface.h"
-#include "..\..\include\evtchn_interface.h"
-#include "..\..\include\gnttab_interface.h"
-#include "..\..\include\debug_interface.h"
-#include "..\..\include\suspend_interface.h"
+#include <xencdb.h>
+#include <names.h>
+#include <store_interface.h>
+#include <evtchn_interface.h>
+#include <gnttab_interface.h>
+#include <debug_interface.h>
+#include <suspend_interface.h>
 
 typedef struct _XENVBD_SG_INDEX {
     ULONG       Index;  // SGList Index

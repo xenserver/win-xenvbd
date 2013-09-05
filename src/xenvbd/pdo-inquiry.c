@@ -34,9 +34,8 @@
 #include "debug.h"
 #include "assert.h"
 #include "util.h"
-#include "..\..\include\xencdb.h"
-#include "..\..\include\xenvbd-ntstrsafe.h"
-
+#include <xencdb.h>
+#include <xenvbd-ntstrsafe.h>
 #include <stdlib.h>
 
 // "00000000-0000-0000-0000-000000000000"

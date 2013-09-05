@@ -33,7 +33,7 @@
 #include "srbext.h"
 #include "debug.h"
 #include "assert.h"
-#include "..\..\include\xencdb.h"
+#include <xencdb.h>
 
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static VOID
