@@ -38,8 +38,8 @@
 #include "assert.h"
 #include "util.h"
 #include "names.h"
+#include "notifier.h"
 #include <store_interface.h>
-#include <evtchn_interface.h>
 #include <gnttab_interface.h>
 #include <suspend_interface.h>
 
@@ -64,13 +64,13 @@ struct _XENVBD_FRONTEND {
 
     // Interfaces to XenBus
     PXENBUS_STORE_INTERFACE     Store;
-    PXENBUS_EVTCHN_INTERFACE    Evtchn;
     PXENBUS_GNTTAB_INTERFACE    Gnttab;
     PXENBUS_SUSPEND_INTERFACE   Suspend;
 
     PXENBUS_SUSPEND_CALLBACK    SuspendLateCallback;
 
     // Ring
+    PXENVBD_NOTIFIER            Notifier;
     KSPIN_LOCK                  RingLock;
     PMDL                        Mdl;
     blkif_sring_t*              SharedRing;
@@ -80,12 +80,6 @@ struct _XENVBD_FRONTEND {
     ULONG                       RequestsOutstanding;
     ULONG                       RequestsSubmitted;
     ULONG                       ResponsesRecieved;
-    // Evtchn
-    PXENBUS_EVTCHN_DESCRIPTOR   EvtchnPort;
-    ULONG                       EvtchnPortNumber;
-    KDPC                        EvtchnDpc;
-    ULONG                       NumEvents;
-    ULONG                       NumDpcs;
 
     // Backend State Watch
     BOOLEAN                     Active;
@@ -179,6 +173,13 @@ FrontendGetInquiry(
 {
     return Frontend->Inquiry;
 }
+PXENVBD_PDO
+FrontendGetPdo(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->Pdo;
+}
 
 //=============================================================================
 // Interface indirection
@@ -215,14 +216,14 @@ FrontendEvtchnTrigger(
     __in  PXENVBD_FRONTEND      Frontend
     )
 {
-    EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
+    NotifierTrigger(Frontend->Notifier);
 }
 VOID
 FrontendEvtchnSend(
     __in  PXENVBD_FRONTEND      Frontend
     )
 {
-    EVTCHN(Send, Frontend->Evtchn, Frontend->EvtchnPort);
+    NotifierSend(Frontend->Notifier);
 }
 NTSTATUS
 FrontendStoreWriteFrontend(
@@ -383,80 +384,6 @@ done:
     KeReleaseSpinLockFromDpcLevel(&Frontend->RingLock);
 }
 
-KSERVICE_ROUTINE EvtchnInterruptFunc;
-
-BOOLEAN
-EvtchnInterruptFunc(
-    __in  PKINTERRUPT             Interrupt,
-    _In_opt_ PVOID                   Context
-    )
-{
-    PXENVBD_FRONTEND        Frontend = (PXENVBD_FRONTEND)Context;
-    
-    UNREFERENCED_PARAMETER(Interrupt);
-
-	// PreFast: C28281
-	if (Frontend) {
-		++Frontend->NumEvents;
-		if (Frontend->Caps.Connected) {
-			if (KeInsertQueueDpc(&Frontend->EvtchnDpc, NULL, NULL))
-				++Frontend->NumDpcs;
-		}
-	}
-
-    return TRUE;
-}
-
-__checkReturn
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE BOOLEAN
-__EvtchnPending(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    BOOLEAN     Pending = FALSE;
-
-    KeAcquireSpinLockAtDpcLevel(&Frontend->RingLock);
-
-    if (Frontend->Evtchn && Frontend->EvtchnPort)
-        Pending = EVTCHN(Unmask, Frontend->Evtchn, Frontend->EvtchnPort, FALSE);
-
-    KeReleaseSpinLockFromDpcLevel(&Frontend->RingLock);
-
-    return Pending;
-}
-
-KDEFERRED_ROUTINE EvtchnDpcFunc;
-
-VOID 
-EvtchnDpcFunc(
-    __in  PKDPC                   Dpc,
-    __in_opt PVOID                Context,
-    __in_opt PVOID                Arg1,
-    __in_opt PVOID                Arg2
-    )
-{
-    PXENVBD_FRONTEND    Frontend = (PXENVBD_FRONTEND)Context;
-
-    UNREFERENCED_PARAMETER(Dpc);
-    UNREFERENCED_PARAMETER(Arg1);
-    UNREFERENCED_PARAMETER(Arg2);
-
-    ASSERT(Frontend != NULL);
-
-    if (PdoIsPaused(Frontend->Pdo)) {
-        Warning("Target[%d] : Paused, %d outstanding\n",
-                    Frontend->TargetId, PdoOutstandingSrbs(Frontend->Pdo));
-        if (PdoOutstandingSrbs(Frontend->Pdo) == 0)
-            return;
-    }
-
-    do {
-        if (Frontend->Caps.Connected)
-            FrontendNotifyResponses(Frontend);
-    } while (__EvtchnPending(Frontend) && Frontend->Caps.Connected);
-}
-
 static FORCEINLINE BOOLEAN
 __FrontendCanSubmitRequest(
     __in  PXENVBD_FRONTEND        Frontend,
@@ -575,7 +502,7 @@ FrontendPushRequests(
 
     RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&Frontend->FrontRing, notify);
     if (notify) {
-        (VOID) EVTCHN(Send, Frontend->Evtchn, Frontend->EvtchnPort);
+        NotifierSend(Frontend->Notifier);
     }
 }
 
@@ -934,9 +861,6 @@ FrontendClose(
     NTSTATUS        Status;
     XenbusState     BackendState;
 
-    // dont try to queue the DPC when the lock is dropped
-    KeRemoveQueueDpc(&Frontend->EvtchnDpc);
-
     // unwatch backend (null check for initial close operation)
     if (Frontend->BackendStateWatch)
         STORE(Unwatch, Frontend->Store, Frontend->BackendStateWatch);
@@ -1157,16 +1081,9 @@ FrontendConnect(
             goto fail2;
     }
 
-    // EVTCHN
-    Status = STATUS_INVALID_PARAMETER;
-    Frontend->EvtchnPort = EVTCHN(Open, Frontend->Evtchn, EVTCHN_UNBOUND, EvtchnInterruptFunc,
-                                    Frontend, Frontend->BackendId, TRUE);
-    if (Frontend->EvtchnPort == NULL)
+    Status = NotifierConnect(Frontend->Notifier, Frontend->BackendId);
+    if (!NT_SUCCESS(Status))
         goto fail3;
-
-    Frontend->EvtchnPortNumber = EVTCHN(Port, Frontend->Evtchn, Frontend->EvtchnPort);
-    if (EVTCHN(Unmask, Frontend->Evtchn, Frontend->EvtchnPort, FALSE))
-        EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
 
     // write evtchn/gnttab details in xenstore
     for (;;) {
@@ -1176,8 +1093,7 @@ FrontendConnect(
         if (!NT_SUCCESS(Status))
             break;
 
-        Status = STORE(Printf, Frontend->Store, Transaction, Frontend->FrontendPath, 
-                        "event-channel", "%u", Frontend->EvtchnPortNumber);
+        Status = NotifierStoreWrite(Frontend->Notifier, Transaction, Frontend->FrontendPath);
         if (!NT_SUCCESS(Status))
             goto abort;
 
@@ -1276,9 +1192,7 @@ fail5:
     Error("Fail5\n");
 fail4:
     Error("Fail4\n");
-    EVTCHN(Close, Frontend->Evtchn, Frontend->EvtchnPort);
-    Frontend->EvtchnPort = NULL;
-    Frontend->EvtchnPortNumber = 0;
+    NotifierDisconnect(Frontend->Notifier);
 fail3:
     Error("Fail3\n");
 fail2:
@@ -1304,10 +1218,7 @@ FrontendDisconnect(
 {
     ULONG   Index;
 
-    // EVTCHN
-    EVTCHN(Close, Frontend->Evtchn, Frontend->EvtchnPort);
-    Frontend->EvtchnPort = NULL;
-    Frontend->EvtchnPortNumber = 0;
+    NotifierDisconnect(Frontend->Notifier);
 
     // GNTTAB
     for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
@@ -1331,7 +1242,7 @@ FrontendEnable(
     Frontend->Caps.Connected = TRUE;
     KeMemoryBarrier();
 
-    EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
+    NotifierEnable(Frontend->Notifier);
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
 static FORCEINLINE VOID
@@ -1340,6 +1251,8 @@ FrontendDisable(
     )
 {
     Frontend->Caps.Connected = FALSE;
+
+    NotifierDisable(Frontend->Notifier);
 }
 
 //=============================================================================
@@ -1506,13 +1419,10 @@ FrontendSuspendLateCallback(
     }
 
     // reset some stats - previous values are just not relevant any more
-    Verbose("Target[%d] : ResetFrom: %d NumEvents, %d NumDpcs\n", 
-                Frontend->TargetId, Frontend->NumEvents, Frontend->NumDpcs);
     Verbose("Target[%d] : ResetFrom: %d Outstanding, %d Submitted, %d Recieved\n", 
                 Frontend->TargetId, Frontend->RequestsOutstanding, 
                 Frontend->RequestsSubmitted, Frontend->ResponsesRecieved);
 
-    Frontend->NumEvents = Frontend->NumDpcs = 0;
     Frontend->RequestsOutstanding = Frontend->RequestsSubmitted = Frontend->ResponsesRecieved = 0;
 
     // dont acquire state lock - called at DISPATCH on 1 vCPU with interrupts enabled
@@ -1523,7 +1433,7 @@ FrontendSuspendLateCallback(
     }
 
     PdoPostResume(Frontend->Pdo);
-    EVTCHN(Trigger, Frontend->Evtchn, Frontend->EvtchnPort);
+    NotifierTrigger(Frontend->Notifier);
 
     Verbose("Target[%d] : <=== restored %s\n", Frontend->TargetId, __XenvbdStateName(Frontend->State));
 }
@@ -1542,7 +1452,6 @@ FrontendD3ToD0(
 
     // acquire interfaces
     Frontend->Store   = FdoAcquireStore(PdoGetFdo(Frontend->Pdo));
-    Frontend->Evtchn  = FdoAcquireEvtchn(PdoGetFdo(Frontend->Pdo));
     Frontend->Gnttab  = FdoAcquireGnttab(PdoGetFdo(Frontend->Pdo));
     Frontend->Suspend = FdoAcquireSuspend(PdoGetFdo(Frontend->Pdo));
 
@@ -1567,9 +1476,6 @@ fail1:
     
     GNTTAB(Release, Frontend->Gnttab);
     Frontend->Gnttab = NULL;
-    
-    EVTCHN(Release, Frontend->Evtchn);
-    Frontend->Evtchn = NULL;
     
     STORE(Release, Frontend->Store);
     Frontend->Store = NULL;
@@ -1608,9 +1514,6 @@ FrontendD0ToD3(
     
     GNTTAB(Release, Frontend->Gnttab);
     Frontend->Gnttab = NULL;
-    
-    EVTCHN(Release, Frontend->Evtchn);
-    Frontend->Evtchn = NULL;
     
     STORE(Release, Frontend->Store);
     Frontend->Store = NULL;
@@ -1689,15 +1592,22 @@ FrontendCreate(
     if (Frontend->TargetPath == NULL)
         goto fail3;
 
+    Status = NotifierCreate(Frontend, &Frontend->Notifier);
+    if (!NT_SUCCESS(Status))
+        goto fail4;
+
     // kernel objects
     KeInitializeSpinLock(&Frontend->StateLock);
     KeInitializeSpinLock(&Frontend->RingLock);
-    KeInitializeDpc(&Frontend->EvtchnDpc, EvtchnDpcFunc, Frontend);
 
     Trace("Target[%d] @ (%d) <===== (STATUS_SUCCESS)\n", Frontend->TargetId, KeGetCurrentIrql());
     *_Frontend = Frontend;
     return STATUS_SUCCESS;
 
+fail4:
+    Error("fail4\n");
+    DriverFormatFree(Frontend->TargetPath);
+    Frontend->TargetPath = NULL;
 fail3:
     Error("fail3\n");
     DriverFormatFree(Frontend->FrontendPath);
@@ -1723,6 +1633,9 @@ FrontendDestroy(
     PdoFreeInquiryData(Frontend->Inquiry);
     Frontend->Inquiry = NULL;
 
+    NotifierDestroy(Frontend->Notifier);
+    Frontend->Notifier = NULL;
+
     DriverFormatFree(Frontend->TargetPath);
     Frontend->TargetPath = NULL;
 
@@ -1734,7 +1647,6 @@ FrontendDestroy(
     ASSERT3P(Frontend->SuspendLateCallback, ==, NULL);
     ASSERT3P(Frontend->SharedRing, ==, NULL);
     ASSERT3U(Frontend->RingGrantRefs[0], ==, 0); // only ASSERTing on 1st entry
-    ASSERT3P(Frontend->EvtchnPort, ==, NULL);
     ASSERT3P(Frontend->BackendStateWatch, ==, NULL);
     ASSERT3P(Frontend->BackendInfoWatch, ==, NULL);
     ASSERT3P(Frontend->BackendSectorSizeWatch, ==, NULL);
@@ -1856,9 +1768,6 @@ FrontendDebugCallback(
             "FRONTEND: State               : %s\n",
             __XenvbdStateName(Frontend->State));
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: Events              : %d Events, %d DPCs\n",
-            Frontend->NumEvents, Frontend->NumDpcs);
-    DEBUG(Printf, Debug, Callback,
             "FRONTEND: Connected           : %s\n", 
             Frontend->Caps.Connected ? "TRUE" : "FALSE");
     DEBUG(Printf, Debug, Callback,
@@ -1951,17 +1860,9 @@ FrontendDebugCallback(
                 "FRONTEND: RingGrantRef[%-2d]    : %d\n", 
                 Index, Frontend->RingGrantRefs[Index]);
     }
-    if (Frontend->EvtchnPort) {
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: EvtchnPort          : %p (%d)\n", 
-                Frontend->EvtchnPort, Frontend->EvtchnPortNumber);
-    } else {
-        DEBUG(Printf, Debug, Callback,
-                "FRONTEND: EvtchnPort          : NULL\n");
-    }
 
-    Frontend->NumEvents = 0;
-    Frontend->NumDpcs = 0;
+    NotifierDebugCallback(Frontend->Notifier, Debug, Callback);
+
     Frontend->RequestsSubmitted = 0;
     Frontend->ResponsesRecieved = 0;
 }

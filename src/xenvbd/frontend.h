@@ -88,6 +88,10 @@ extern PVOID
 FrontendGetInquiry(
     __in  PXENVBD_FRONTEND      Frontend
     );
+extern PXENVBD_PDO
+FrontendGetPdo(
+    __in  PXENVBD_FRONTEND      Frontend
+    );
 
 // Interface indirection
 extern NTSTATUS
