@@ -525,7 +525,7 @@ ignore:
 }
 __checkReturn
 static FORCEINLINE BOOLEAN
-__FdoIsPdoMasked(
+__FdoIsPdoUnplugged(
     __in PXENVBD_FDO                 Fdo,
     __in PCHAR                       Enumerator,
     __in PCHAR                       Device,
@@ -536,25 +536,25 @@ __FdoIsPdoMasked(
     if (Target > 3) {
         Verbose("Target[%d] : (%s/%s) Emulated NOT_APPLICABLE (non-IDE device)\n", 
                             Target, Enumerator, Device);
-        return FALSE;
+        return TRUE;
     }
      
     // Check presense of Emulated interface. Absence indicates emulated cannot be unplugged
     if (Fdo->Emulated == NULL) {
         Warning("Target[%d] : (%s/%s) Emulated NOT_KNOWN (assumed PRESENT)\n", 
                             Target, Enumerator, Device);
-        return TRUE;
+        return FALSE;
     }
 
     // Ask XenFilt if Ctrlr(0), Target(Target), Lun(0) is present
     if (EMULATED(IsDiskPresent, Fdo->Emulated, 0, Target, 0)) {
         Verbose("Target[%d] : (%s/%s) Emulated PRESENT\n", 
                             Target, Enumerator, Device);
-        return TRUE;
+        return FALSE;
     } else {
         Verbose("Target[%d] : (%s/%s) Emulated NOT_PRESENT\n", 
                             Target, Enumerator, Device);
-        return FALSE;
+        return TRUE;
     }
 }
 __checkReturn
@@ -605,7 +605,7 @@ __FdoEnumerate(
 
     // add new targets
     for (Device = Devices; *Device; Device = __NextSz(Device)) {
-        BOOLEAN     EmulatedMasked;
+        BOOLEAN     EmulatedUnplugged;
         XENVBD_DEVICE_TYPE  DeviceType;
 
         TargetId = __ParseVbd(Device);
@@ -623,8 +623,8 @@ __FdoEnumerate(
             continue;
         }
 
-        EmulatedMasked = __FdoIsPdoMasked(Fdo, FdoEnum(Fdo), Device, TargetId);
-        Status = PdoCreate(Fdo, Device, TargetId, EmulatedMasked, ThreadGetEvent(Fdo->FrontendThread), DeviceType);
+        EmulatedUnplugged = __FdoIsPdoUnplugged(Fdo, FdoEnum(Fdo), Device, TargetId);
+        Status = PdoCreate(Fdo, Device, TargetId, EmulatedUnplugged, ThreadGetEvent(Fdo->FrontendThread), DeviceType);
         if (NT_SUCCESS(Status)) {
             NeedInvalidate = TRUE;
         }

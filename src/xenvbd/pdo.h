@@ -102,7 +102,7 @@ PdoMissingReason(
 
 __checkReturn
 extern BOOLEAN
-PdoIsMasked(
+PdoIsEmulatedUnplugged(
     __in PXENVBD_PDO             Pdo
     );
 

@@ -72,7 +72,7 @@ struct _XENVBD_PDO {
     XENVBD_DEVICE_TYPE          DeviceType;
 
     // State
-    BOOLEAN                     EmulatedMasked;
+    BOOLEAN                     EmulatedUnplugged;
     LONG                        Paused;
 
     // Eject
@@ -188,8 +188,8 @@ PdoDebugCallback(
           "PDO: DevicePowerState       : %s\n",
           PowerDeviceStateName(Pdo->DevicePowerState));
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: EmulatedMasked         : %s\n", 
-          Pdo->EmulatedMasked ? "TRUE" : "FALSE");
+          "PDO: EmulatedUnplugged      : %s\n", 
+          Pdo->EmulatedUnplugged ? "TRUE" : "FALSE");
     DEBUG(Printf, DebugInterface, DebugCallback,
           "PDO: Missing                : %s\n",
           Pdo->Missing ? Pdo->Reason : "Not Missing");
@@ -314,11 +314,11 @@ PdoMissingReason(
 }
 __checkReturn
 FORCEINLINE BOOLEAN
-PdoIsMasked(
+PdoIsEmulatedUnplugged(
     __in PXENVBD_PDO             Pdo
     )
 {
-    return Pdo->EmulatedMasked;
+    return Pdo->EmulatedUnplugged;
 }
 FORCEINLINE VOID
 PdoSetDevicePnpState(
@@ -390,7 +390,7 @@ PdoCreate(
     __in PXENVBD_FDO             Fdo,
     __in __nullterminated PCHAR  DeviceId,
     __in ULONG                   TargetId,
-    __in BOOLEAN                 EmulatedMasked,
+    __in BOOLEAN                 EmulatedUnplugged,
     __in PKEVENT                 FrontendEvent,
     __in XENVBD_DEVICE_TYPE      DeviceType
     )
@@ -406,7 +406,7 @@ PdoCreate(
     if (!Pdo)
         goto fail1;
 
-    Verbose("Target[%d] : Creating (%s)\n", TargetId, EmulatedMasked ? "PV" : "Emulated");
+    Verbose("Target[%d] : Creating (%s)\n", TargetId, EmulatedUnplugged ? "PV" : "Emulated");
     Pdo->Signature      = PDO_SIGNATURE;
     Pdo->Fdo            = Fdo;
     Pdo->DeviceObject   = NULL; // filled in later
@@ -415,7 +415,7 @@ PdoCreate(
     Pdo->Paused         = 1; // Paused until D3->D0 transition
     Pdo->DevicePnpState = Present;
     Pdo->DevicePowerState = PowerDeviceD3;
-    Pdo->EmulatedMasked = EmulatedMasked;
+    Pdo->EmulatedUnplugged = EmulatedUnplugged;
     Pdo->DeviceType     = DeviceType;
 
     KeInitializeSpinLock(&Pdo->Lock);
@@ -440,7 +440,7 @@ PdoCreate(
     if (!FdoLinkPdo(Fdo, Pdo))
         goto fail4;
 
-    Verbose("Target[%d] : Created (%s)\n", TargetId, EmulatedMasked ? "PV" : "Emulated");
+    Verbose("Target[%d] : Created (%s)\n", TargetId, EmulatedUnplugged ? "PV" : "Emulated");
     Trace("Target[%d] @ (%d) <=====\n", TargetId, KeGetCurrentIrql());
     return STATUS_SUCCESS;
 
@@ -515,7 +515,7 @@ PdoD3ToD0(
         return STATUS_SUCCESS;
 
     Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
-    Verbose("Target[%d] : D3->D0 (%s)\n", TargetId, Pdo->EmulatedMasked ? "PV" : "Emulated");
+    Verbose("Target[%d] : D3->D0 (%s)\n", TargetId, Pdo->EmulatedUnplugged ? "PV" : "Emulated");
 
     // power up frontend
     Status = FrontendD3ToD0(Pdo->Frontend);
@@ -523,7 +523,7 @@ PdoD3ToD0(
         goto fail1;
     
     // connect frontend
-    if (Pdo->EmulatedMasked) {
+    if (Pdo->EmulatedUnplugged) {
         Status = FrontendSetState(Pdo->Frontend, XENVBD_ENABLED);
         if (!NT_SUCCESS(Status))
             goto fail2;
@@ -555,10 +555,10 @@ PdoD0ToD3(
         return;
 
     Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
-    Verbose("Target[%d] : D0->D3 (%s)\n", TargetId, Pdo->EmulatedMasked ? "PV" : "Emulated");
+    Verbose("Target[%d] : D0->D3 (%s)\n", TargetId, Pdo->EmulatedUnplugged ? "PV" : "Emulated");
 
     // close frontend
-    if (Pdo->EmulatedMasked) {
+    if (Pdo->EmulatedUnplugged) {
         __PdoPauseDataPath(Pdo);
         (VOID) FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
         PdoAbortAllSrbs(Pdo);
@@ -1930,8 +1930,8 @@ __ValidateSrbForPdo(
         return FALSE;
     }
 
-    if (!Pdo->EmulatedMasked) {
-        Error("Target[%d] : Emulated Masked (%02x:%s)\n", 
+    if (!Pdo->EmulatedUnplugged) {
+        Error("Target[%d] : Disk is Emulated (%02x:%s)\n", 
                 PdoGetTargetId(Pdo), Operation, Cdb_OperationName(Operation));
         Srb->SrbStatus = SRB_STATUS_NO_DEVICE;
         return FALSE;
