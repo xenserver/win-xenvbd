@@ -1226,6 +1226,8 @@ __FdoTerminate(
     Fdo->CurrentSrbs = Fdo->MaximumSrbs = Fdo->TotalSrbs = 0;
     RtlZeroMemory(&Fdo->Enumerator, sizeof(ANSI_STRING));
     RtlZeroMemory(&Fdo->TargetLock, sizeof(KSPIN_LOCK));
+    RtlZeroMemory(&Fdo->Lock, sizeof(KSPIN_LOCK));
+    RtlZeroMemory(&Fdo->RemoveEvent, sizeof(KEVENT));
     __FdoZeroInterfaces(Fdo);
 
     ASSERT(IsZeroMemory(Fdo, sizeof(XENVBD_FDO)));
