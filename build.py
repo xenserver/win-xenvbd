@@ -247,8 +247,9 @@ def callfnout(cmd):
 
     if ret != 0:
         raise(Exception("Error %d in : %s" % (ret, cmd)))
-    print("------------------------------------------------------------")
+
     return output.decode('utf-8')
+
 def archive(filename, files, tgz=False):
     access='w'
     if tgz:
@@ -256,7 +257,6 @@ def archive(filename, files, tgz=False):
     tar = tarfile.open(filename, access)
     for name in files :
         try:
-            print('adding '+name)
             tar.add(name)
         except:
             pass
