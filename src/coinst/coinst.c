@@ -186,7 +186,11 @@ RequestUnplug(
     )
 {
     HKEY    UnplugKey;
+    DWORD   DisksLength;
+    PTCHAR  Disks;
+    DWORD   Offset;
     HRESULT Error;
+    HRESULT Result;
 
     Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
                          UNPLUG_KEY(XENFILT),
@@ -198,20 +202,51 @@ RequestUnplug(
         goto fail1;
     }
 
+    DisksLength = (DWORD)((strlen("XENVBD") + 1 +
+                           1) * sizeof (TCHAR));
+
+    Disks = calloc(1, DisksLength);
+    if (Disks == NULL)
+        goto fail2;
+
+    Offset = 0;
+
+    Result = StringCbPrintf(Disks + Offset,
+                            DisksLength - (Offset * sizeof (TCHAR)),
+                            "XENVBD");
+    if (!SUCCEEDED(Result)) {
+        SetLastError(ERROR_BUFFER_OVERFLOW);
+        goto fail3;
+    }
+
+    Offset += (DWORD)(strlen("XENVBD") + 1);
+
+    *(Disks + Offset) = '\0';
+
     Error = RegSetValueEx(UnplugKey,
                           "DISKS",
                           0,
-                          REG_SZ,
-                          (LPBYTE)"XENVBD",
-                          (DWORD)sizeof ("XENVBD"));
+                          REG_MULTI_SZ,
+                          (LPBYTE)Disks,
+                          DisksLength);
     if (Error != ERROR_SUCCESS) {
         SetLastError(Error);
-        goto fail2;
+        goto fail4;
     }
+
+    free(Disks);
 
     RegCloseKey(UnplugKey);
 
     return TRUE;
+
+fail4:
+    Log("fail4");
+
+fail3:
+    Log("fail3");
+
+    free(Disks);
 
 fail2:
     Log("fail2");
