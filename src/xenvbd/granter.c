@@ -183,25 +183,27 @@ GranterDebugCallback(
 
 NTSTATUS
 GranterGet(
-    IN  PXENVBD_GRANTER             Granter,
-    IN  PFN_NUMBER                  Pfn,
-    IN  BOOLEAN                     ReadOnly,
-    OUT PULONG                      Grant
+    IN  PXENVBD_GRANTER Granter,
+    IN  PFN_NUMBER      Pfn,
+    IN  BOOLEAN         ReadOnly,
+    OUT PULONG          Grant
     )
 {
-    NTSTATUS    status;
+    NTSTATUS            status;
 
     status = GNTTAB(Get, Granter->GnttabInterface, Grant);
     if (!NT_SUCCESS(status))
         goto fail1;
 
-    GNTTAB(PermitForeignAccess, 
-            Granter->GnttabInterface, 
-            *Grant, 
-            Granter->BackendDomain,
-            GNTTAB_ENTRY_FULL_PAGE,
-            Pfn,
-            ReadOnly);
+    status = GNTTAB(PermitForeignAccess, 
+                    Granter->GnttabInterface, 
+                    *Grant, 
+                    Granter->BackendDomain,
+                    GNTTAB_ENTRY_FULL_PAGE,
+                    Pfn,
+                    ReadOnly);
+    ASSERT(NT_SUCCESS(status));
+    
     return STATUS_SUCCESS;
 
 fail1:
@@ -210,11 +212,17 @@ fail1:
 
 VOID
 GranterPut(
-    IN  PXENVBD_GRANTER             Granter,
-    IN  ULONG                       Grant
+    IN  PXENVBD_GRANTER Granter,
+    IN  ULONG           Grant
     )
 {
-    GNTTAB(RevokeForeignAccess, Granter->GnttabInterface, Grant);
+    NTSTATUS            status;
+
+    status = GNTTAB(RevokeForeignAccess,
+                    Granter->GnttabInterface,
+                    Grant);
+    ASSERT(NT_SUCCESS(status));
+
     GNTTAB(Put, Granter->GnttabInterface, Grant);
 }
 
