@@ -21,8 +21,8 @@
 #ifndef __XEN_PUBLIC_HVM_HVM_OP_H__
 #define __XEN_PUBLIC_HVM_HVM_OP_H__
 
-#include "..\..\include\xen\xen.h"
-#include "..\..\include\xen\trace.h"
+#include "../xen.h"
+#include "../trace.h"
 
 /* Get/set subcommands: extra argument == pointer to xen_hvm_param struct. */
 #define HVMOP_set_param           0
@@ -131,9 +131,6 @@ DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_mem_type_t);
 
 #endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
 
-/* Hint from PV drivers for process destruction. */
-#define HVMOP_process_dying        0x102
-
 /* Hint from PV drivers for pagetable destruction. */
 #define HVMOP_pagetable_dying        9
 struct xen_hvm_pagetable_dying {
@@ -177,6 +174,9 @@ typedef enum {
     HVMMEM_access_rwx,
     HVMMEM_access_rx2rw,       /* Page starts off as r-x, but automatically
                                 * change to r-w on a write */
+    HVMMEM_access_n2rwx,       /* Log access: starts off as n, automatically 
+                                * goes to rwx, generating an event without
+                                * pausing the vcpu */
     HVMMEM_access_default      /* Take the domain default */
 } hvmmem_access_t;
 /* Notify that a region of memory is to have specific access types */
@@ -217,10 +217,21 @@ struct xen_hvm_inject_trap {
     domid_t domid;
     /* VCPU */
     uint32_t vcpuid;
-    /* Trap number */
-    uint32_t trap;
-    /* Error code, or -1 to skip */
+    /* Vector number */
+    uint32_t vector;
+    /* Trap type (HVMOP_TRAP_*) */
+    uint32_t type;
+/* NB. This enumeration precisely matches hvm.h:X86_EVENTTYPE_* */
+# define HVMOP_TRAP_ext_int    0 /* external interrupt */
+# define HVMOP_TRAP_nmi        2 /* nmi */
+# define HVMOP_TRAP_hw_exc     3 /* hardware exception */
+# define HVMOP_TRAP_sw_int     4 /* software interrupt (CD nn) */
+# define HVMOP_TRAP_pri_sw_exc 5 /* ICEBP (F1) */
+# define HVMOP_TRAP_sw_exc     6 /* INT3 (CC), INTO (CE) */
+    /* Error code, or ~0u to skip */
     uint32_t error_code;
+    /* Intruction length */
+    uint32_t insn_len;
     /* CR2 for page faults */
     uint64_aligned_t cr2;
 };
@@ -243,11 +254,22 @@ struct xen_hvm_get_mem_type {
 typedef struct xen_hvm_get_mem_type xen_hvm_get_mem_type_t;
 DEFINE_XEN_GUEST_HANDLE(xen_hvm_get_mem_type_t);
 
-#define HVMOP_set_driver_version 0x103
-struct xen_hvm_set_driver_version {
-    uint32_t build;
+/* Following tools-only interfaces may change in future. */
+#if defined(__XEN__) || defined(__XEN_TOOLS__)
+
+/* MSI injection for emulated devices */
+#define HVMOP_inject_msi         16
+struct xen_hvm_inject_msi {
+    /* Domain to be injected */
+    domid_t   domid;
+    /* Data -- lower 32 bits */
+    uint32_t  data;
+    /* Address (0xfeexxxxx) */
+    uint64_t  addr;
 };
-typedef struct xen_hvm_set_driver_version xen_hvm_set_driver_version_t;
-DEFINE_XEN_GUEST_HANDLE(xen_hvm_set_driver_version_t);
+typedef struct xen_hvm_inject_msi xen_hvm_inject_msi_t;
+DEFINE_XEN_GUEST_HANDLE(xen_hvm_inject_msi_t);
+
+#endif /* defined(__XEN__) || defined(__XEN_TOOLS__) */
 
 #endif /* __XEN_PUBLIC_HVM_HVM_OP_H__ */

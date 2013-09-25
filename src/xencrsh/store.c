@@ -1088,7 +1088,7 @@ StoreInitialize()
 
     StoreRingPtr->req_cons = 0x01020304;
     Status = HvmAddToPhysMap((PFN_NUMBER)(PhysAddr.QuadPart >> PAGE_SHIFT), 
-                             XENMAPSPACE_physical, (ULONG)Mfn);
+                             XENMAPSPACE_gmfn, (ULONG)Mfn);
     if (NT_SUCCESS(Status)) {
         LogVerbose("Page Swizzled\n");
         if (StoreRingPtr->req_cons == 0x01020304)
