@@ -46,8 +46,6 @@
 
 #include <stdlib.h>
 
-#define XEN_IO_PROTO_ABI_NATIVE     "x86_32-abi"
-
 #define DOMID_INVALID (0x7FF4U)
 // States in XenStore (Note - numbers must match!)
 typedef enum _XENBUS_STATE {

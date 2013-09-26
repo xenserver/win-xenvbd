@@ -61,7 +61,14 @@ struct _XENVBD_BLOCKRING {
 
 #define MAX_NAME_LEN                64
 #define BLOCKRING_POOL_TAG          'gnRX'
-#define XEN_IO_PROTO_ABI_NATIVE     "x86_32-abi"
+
+#if defined(__i386__)
+#define XEN_IO_PROTO_ABI    "x86_32-abi"
+#elif defined(__x86_64__)
+#define XEN_IO_PROTO_ABI    "x86_64-abi"
+#else
+#error 'Unrecognised architecture'
+#endif
 
 extern PHYSICAL_ADDRESS MmGetPhysicalAddress(IN PVOID Buffer);
 
@@ -269,7 +276,7 @@ BlockRingStoreWrite(
                     Transaction, 
                     FrontendPath,
                     "protocol", 
-                    XEN_IO_PROTO_ABI_NATIVE);
+                    XEN_IO_PROTO_ABI);
     if (!NT_SUCCESS(status))
         return status;
 
