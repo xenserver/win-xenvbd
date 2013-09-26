@@ -56,6 +56,8 @@ typedef struct _XENVBD_PARAMETERS {
 
 extern XENVBD_PARAMETERS    DriverParameters;
 
+extern HANDLE               DriverServiceKey;
+
 // Fdo Device Extension management
 extern VOID
 DriverLinkFdo(

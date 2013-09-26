@@ -46,7 +46,8 @@
 #define IS_FDO          ((ULONG)'odf')
 #define IS_PDO          ((ULONG)'odp')
 //=============================================================================
-XENVBD_PARAMETERS    DriverParameters;
+XENVBD_PARAMETERS   DriverParameters;
+HANDLE              DriverServiceKey;
 
 #define XENVBD_POOL_TAG     'dbvX'
 
@@ -593,6 +594,7 @@ DriverUnload(
          DAY_STR "/" MONTH_STR "/" YEAR_STR);
     StorPortDriverUnload(_DriverObject);
     BufferTerminate();
+    ZwClose(DriverServiceKey);
     Trace("<=== (Irql=%d)\n", KeGetCurrentIrql());
 }
 
@@ -606,6 +608,8 @@ DriverEntry(
     )
 {
     NTSTATUS                Status;
+    OBJECT_ATTRIBUTES       Attributes;
+    UNICODE_STRING          Unicode;
     HW_INITIALIZATION_DATA  InitData;
 
     // RegistryPath == NULL if crashing!
@@ -624,6 +628,21 @@ DriverEntry(
         Status = STATUS_SUCCESS;
         goto done;
     }
+
+    InitializeObjectAttributes(&Attributes,
+                               RegistryPath,
+                               OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE,
+                               NULL,
+                               NULL);
+
+    Status = ZwOpenKey(&DriverServiceKey,
+                       KEY_ALL_ACCESS,
+                       &Attributes);
+    if (!NT_SUCCESS(Status))
+        goto done;
+
+    RtlInitUnicodeString(&Unicode, L"NeedReboot");
+    (VOID)ZwDeleteValueKey(DriverServiceKey, &Unicode);
 
     KeInitializeSpinLock(&__XenvbdLock);
     __XenvbdFdo = NULL;

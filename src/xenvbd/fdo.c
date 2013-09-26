@@ -557,6 +557,52 @@ __FdoIsPdoUnplugged(
         return TRUE;
     }
 }
+static VOID
+__FdoNotifyInstaller(
+    __in PXENVBD_FDO                Fdo
+    )
+{
+    UNICODE_STRING                  Unicode;
+    PKEY_VALUE_PARTIAL_INFORMATION  Partial;
+    NTSTATUS                        status;
+
+    UNREFERENCED_PARAMETER(Fdo);
+
+    Partial = __AllocateNonPagedPoolWithTag(__FUNCTION__,
+                                            __LINE__,
+                                            FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) +
+                                            sizeof (ULONG),
+                                            FDO_SIGNATURE);
+    status = STATUS_NO_MEMORY;
+    if (Partial == NULL)
+        goto fail1;
+
+    Partial->TitleIndex = 0;
+    Partial->Type = REG_DWORD;
+    Partial->DataLength = sizeof (ULONG);
+    *(PULONG)Partial->Data = 1;            
+
+    RtlInitUnicodeString(&Unicode, L"NeedReboot");
+
+    status = ZwSetValueKey(DriverServiceKey,
+                           &Unicode,
+                           Partial->TitleIndex,
+                           Partial->Type,
+                           Partial->Data,
+                           Partial->DataLength);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
+    __FreePoolWithTag(Partial, FDO_SIGNATURE);
+
+    return;
+
+fail2:
+    Error("fail2\n");
+
+fail1:
+    Error("fail1 (%08x)\n", status);
+}
 __checkReturn
 static FORCEINLINE BOOLEAN
 __FdoEnumerate(
@@ -624,6 +670,9 @@ __FdoEnumerate(
         }
 
         EmulatedUnplugged = __FdoIsPdoUnplugged(Fdo, FdoEnum(Fdo), Device, TargetId);
+        if (!EmulatedUnplugged)
+            __FdoNotifyInstaller(Fdo);
+
         Status = PdoCreate(Fdo, Device, TargetId, EmulatedUnplugged, ThreadGetEvent(Fdo->FrontendThread), DeviceType);
         if (NT_SUCCESS(Status)) {
             NeedInvalidate = TRUE;
