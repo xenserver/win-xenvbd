@@ -62,13 +62,7 @@ struct _XENVBD_BLOCKRING {
 #define MAX_NAME_LEN                64
 #define BLOCKRING_POOL_TAG          'gnRX'
 
-#if defined(__i386__)
-#define XEN_IO_PROTO_ABI    "x86_32-abi"
-#elif defined(__x86_64__)
 #define XEN_IO_PROTO_ABI    "x86_64-abi"
-#else
-#error 'Unrecognised architecture'
-#endif
 
 extern PHYSICAL_ADDRESS MmGetPhysicalAddress(IN PVOID Buffer);
 
