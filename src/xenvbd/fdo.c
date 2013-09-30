@@ -568,6 +568,8 @@ __FdoNotifyInstaller(
 
     UNREFERENCED_PARAMETER(Fdo);
 
+    ASSERT3U(KeGetCurrentIrql(), ==, PASSIVE_LEVEL);
+
     Partial = __AllocateNonPagedPoolWithTag(__FUNCTION__,
                                             __LINE__,
                                             FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) +
@@ -603,18 +605,21 @@ fail2:
 fail1:
     Error("fail1 (%08x)\n", status);
 }
-__checkReturn
-static FORCEINLINE BOOLEAN
+static FORCEINLINE VOID
 __FdoEnumerate(
-    __in PXENVBD_FDO                 Fdo,
-    __in PCHAR                       Devices
+    __in    PXENVBD_FDO Fdo,
+    __in    PCHAR       Devices,
+    __out   PBOOLEAN    NeedInvalidate,
+    __out   PBOOLEAN    NeedReboot
     )
 {
-    BOOLEAN     NeedInvalidate = FALSE;
-    ULONG       TargetId;
-    PCHAR       Device;
-    PXENVBD_PDO Pdo;
-    NTSTATUS    Status;
+    ULONG               TargetId;
+    PCHAR               Device;
+    PXENVBD_PDO         Pdo;
+    NTSTATUS            Status;
+
+    *NeedInvalidate = FALSE;
+    *NeedReboot = FALSE;
 
     for (TargetId = 0; TargetId < XENVBD_MAX_TARGETS; ++TargetId) {
         Pdo = __FdoGetPdo(Fdo, TargetId);
@@ -635,7 +640,7 @@ __FdoEnumerate(
                 if (PdoGetDevicePnpState(Pdo) == Present)
                     PdoSetDevicePnpState(Pdo, Deleted);
                 else
-                    NeedInvalidate = TRUE;
+                    *NeedInvalidate = TRUE;
             }
         }
         
@@ -669,35 +674,39 @@ __FdoEnumerate(
             continue;
         }
 
-        EmulatedUnplugged = __FdoIsPdoUnplugged(Fdo, FdoEnum(Fdo), Device, TargetId);
-        if (!EmulatedUnplugged)
-            __FdoNotifyInstaller(Fdo);
+        EmulatedUnplugged = __FdoIsPdoUnplugged(Fdo,
+                                                FdoEnum(Fdo),
+                                                Device,
+                                                TargetId);
+        *NeedReboot |= !EmulatedUnplugged;
 
-        Status = PdoCreate(Fdo, Device, TargetId, EmulatedUnplugged, ThreadGetEvent(Fdo->FrontendThread), DeviceType);
-        if (NT_SUCCESS(Status)) {
-            NeedInvalidate = TRUE;
-        }
+        Status = PdoCreate(Fdo,
+                           Device,
+                           TargetId,
+                           EmulatedUnplugged,
+                           ThreadGetEvent(Fdo->FrontendThread), DeviceType);
+        *NeedInvalidate |= (NT_SUCCESS(Status)) ? TRUE : FALSE;
     }
-
-    return NeedInvalidate;
 }
 __drv_requiresIRQL(DISPATCH_LEVEL)
-static DECLSPEC_NOINLINE BOOLEAN
+static DECLSPEC_NOINLINE VOID
 FdoScanTargets(
-    __in PXENVBD_FDO                 Fdo
+    __in    PXENVBD_FDO Fdo,
+    __out   PBOOLEAN    NeedInvalidate,
+    __out   PBOOLEAN    NeedReboot
     )
 {
     NTSTATUS        Status;
     PCHAR           Buffer;
-    BOOLEAN         NeedInvalidate = FALSE;
 
     Status = STORE(Directory, Fdo->Store, NULL, "device", FdoEnum(Fdo), &Buffer);
     if (NT_SUCCESS(Status)) {
-        NeedInvalidate = __FdoEnumerate(Fdo, Buffer);
+        __FdoEnumerate(Fdo, Buffer, NeedInvalidate, NeedReboot);
         STORE(Free, Fdo->Store, Buffer);
+    } else {
+        *NeedInvalidate = FALSE;
+        *NeedReboot = FALSE;
     }
-
-    return NeedInvalidate;
 }
 
 static DECLSPEC_NOINLINE VOID
@@ -733,6 +742,7 @@ FdoScan(
     for (;;) {
         KIRQL   Irql;
         BOOLEAN NeedInvalidate;
+        BOOLEAN NeedReboot;
         
         if (!ThreadWait(Thread))
             break;
@@ -743,7 +753,7 @@ FdoScan(
             continue;
         }
         
-        NeedInvalidate = FdoScanTargets(Fdo);
+        FdoScanTargets(Fdo, &NeedInvalidate, &NeedReboot);
 
         KeReleaseSpinLock(&Fdo->Lock, Irql);
 
@@ -751,6 +761,9 @@ FdoScan(
             FdoLogTargets("ScanThread", Fdo);
             StorPortNotification(BusChangeDetected, Fdo, 0);
         }
+
+        if (NeedReboot)
+            __FdoNotifyInstaller(Fdo);
     }
 
     return STATUS_SUCCESS;
@@ -1554,16 +1567,21 @@ FdoDispatchPnp(
     case IRP_MN_QUERY_DEVICE_RELATIONS:
         if (Stack->Parameters.QueryDeviceRelations.Type == BusRelations) {
             KIRQL   Irql;
-            BOOLEAN Changed = FALSE;
+            BOOLEAN NeedInvalidate;
+            BOOLEAN NeedReboot;
 
             KeAcquireSpinLock(&Fdo->Lock, &Irql);
             
-            if (Fdo->DevicePower == PowerDeviceD0)
-                Changed = FdoScanTargets(Fdo);
+            if (Fdo->DevicePower == PowerDeviceD0) {
+                FdoScanTargets(Fdo, &NeedInvalidate, &NeedReboot);
+            } else {
+                NeedInvalidate = FALSE;
+                NeedReboot = FALSE;
+            }
             
             KeReleaseSpinLock(&Fdo->Lock, Irql);
 
-            if (Changed)
+            if (NeedInvalidate)
                 FdoLogTargets("QUERY_RELATIONS", Fdo);
         }
         FdoDereference(Fdo);
