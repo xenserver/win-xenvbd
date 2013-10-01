@@ -6,7 +6,7 @@ It's important to note that the build scripts generate a driver which is
 version of Windows you must enabled testsigning mode otherwise your system
 will fail signature verification checked on the next reboot.
 If you wish to install the test certificate on the target system then copy
-xenvif.pfx (which you'll find in he proj subdirectory) onto your system and
+xenvbd.pfx (which you'll find in he proj subdirectory) onto your system and
 use certmgr to install it. (It is not password protected).
 
 xenvbd.sys binds to one of three devices which may be created by XenBus:
