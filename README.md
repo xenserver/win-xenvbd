@@ -1,58 +1,85 @@
-XenVbd - The XenServer Windows Virtual Block Device Driver
-==========================================
+XenVif - The XenServer Paravitual Network Class Driver for Windows
+==================================================================
 
-XenVbd consists of two device drivers:
+The XenVif package consists of two single device drivers:
 
-*    XenVbd.sys is a virtual block device driver.  XenVbd replaces the
-     emulated disk device with a faster paravirtual block device allowing
-     for faster reads and writes from and to the disk.
+*    xenvbd.sys is a STORPORT miniport driver which attaches to a virtual
+     device created by XenBus (see https://github.com/xenserver/win-xenbus)
+     and creates a child device for each VBD for the generic disk driver to
+     attach to.
+     It is also a protocol driver for the blkif wire protocol (see
+     include\\xen\\io\\blkif.h).
 
-*    XenCrsh.sys is a library which provides the code to support XenVbd acting
-     as a crashdump driver.  This is used to write crashdumps to the virtual 
-     block device in the event of an error.
+*    xencrsh.sys is a driver which provides the necessary code to write a
+     crashdump out to the paravirtual backend in the event of a BugCheck. 
 
-Quick Start
-===========
+Quick Start Guide
+=================
 
-Prerequisites to build
-----------------------
-
-*   Visual Studio 2012 or later 
-*   Windows Driver Kit 8 or later
-*   Python 3 or later 
-
-Environment variables used in building driver
------------------------------
-
-MAJOR\_VERSION Major version number
-
-MINOR\_VERSION Minor version number
-
-MICRO\_VERSION Micro version number
-
-BUILD\_NUMBER Build number
-
-SYMBOL\_SERVER location of a writable symbol server directory
-
-KIT location of the Windows driver kit
-
-PROCESSOR\_ARCHITECTURE x86 or x64
-
-VS location of visual studio
-
-Commands to build
------------------
-
-    git clone http://github.com/xenserver/win-xenvbd
-    cd win-xenvbd
-    .\build.py [checked | free]
-
-Device tree diagram
+Building the driver
 -------------------
 
+First you'll need a device driver build environment for Windows 8. For this
+you must use:
 
-    XenVbd--(XenCrsh)
-       |
-    XenBus
-       |
-    PCI Bus      
+*   Visual Studio 2012 (Professional or Ultimate)
+*   Windows Driver Kit 8
+
+(See http://msdn.microsoft.com/en-us/windows/hardware/hh852365.aspx). You
+may find it useful to install VirtualCloneDrive from http://www.slysoft.com
+as Visual Studio is generally supplied in ISO form.
+
+Install Visual Studio first (you only need install MFC for C++) and then
+the WDK. Set an environment variable called VS to the base of the Visual
+Studio Installation (e.g. C:\Program Files\Microsoft Visual Studio 11.0) and
+a variable called KIT to the base of the WDK
+(e.g. C:\Program Files\Windows Kits\8.0). Also set an environment variable
+called SYMBOL\_SERVER to point at a location where driver symbols can be
+stored. This can be local directory e.g. C:\Symbols.
+
+Next you'll need a 3.x version of python (which you can get from
+http://www.python.org). Make sure python.exe is somewhere on your default
+path.
+
+Now fire up a Command Prompt and navigate to the base of your git repository.
+At the prompt type:
+
+    build.py checked
+
+This will create a debug build of the driver. To create a non-debug build
+type:
+
+    build.py free
+
+Installing the driver
+---------------------
+
+See INSTALL.md
+
+Miscellaneous
+=============
+
+For convenience the source repository includes some other scripts:
+
+kdfiles.py
+----------
+
+This generates two files called kdfiles32.txt and kdfiles64.txt which can
+be used as map files for the .kdfiles WinDBG command.
+
+sdv.py
+------
+
+This runs Static Driver Verifier on the source.
+
+clean.py
+--------
+
+This removes any files not checked into the repository and not covered by
+the .gitignore file.
+
+get_xen_headers.py
+------------------
+
+This will import any necessary headers from a given tag of that Xen
+repository at git://xenbits.xen.org/xen.git.
