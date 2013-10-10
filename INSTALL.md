@@ -1,4 +1,4 @@
-Installing XenVif
+Installing XenVbd
 =================
 
 It's important to note that the build scripts generate a driver which is
