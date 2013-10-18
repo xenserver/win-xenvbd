@@ -652,7 +652,7 @@ __WriteRing(
             goto abort;
 
         Status = StoreWrite(Transaction, Frontend->FrontendPath,
-                        "protocol", "x86_32-abi");
+                        "protocol", "x86_64-abi");
         if (!NT_SUCCESS(Status))
             goto abort;
 
