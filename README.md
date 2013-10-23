@@ -1,7 +1,7 @@
-XenVif - The XenServer Paravitual Network Class Driver for Windows
+XenVbd - The XenServer Paravitual Storage Class Driver for Windows
 ==================================================================
 
-The XenVif package consists of two single device drivers:
+The XenVbd package consists of two single device drivers:
 
 *    xenvbd.sys is a STORPORT miniport driver which attaches to a virtual
      device created by XenBus (see https://github.com/xenserver/win-xenbus)

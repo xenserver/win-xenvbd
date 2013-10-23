@@ -239,8 +239,6 @@ NotifierDisable(
 {
     ASSERT(Notifier->Enabled == TRUE);
 
-    KeFlushQueuedDpcs();
-
     Notifier->Enabled = FALSE;
 }
 
