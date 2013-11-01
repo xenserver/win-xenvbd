@@ -627,6 +627,7 @@ __ReadDiskInfo(
                                                     Frontend->DiskInfo.SectorCount, &Updated);
 
     if (Updated) {
+        Frontend->Caps.SurpriseRemovable = !!(Frontend->DiskInfo.DiskInfo & VDISK_REMOVABLE);
         if (Frontend->DiskInfo.DiskInfo & VDISK_READONLY) {
             Warning("Target[%d] : DiskInfo contains VDISK_READONLY flag!\n", Frontend->TargetId);
         }
