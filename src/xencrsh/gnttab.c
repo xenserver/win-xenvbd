@@ -54,8 +54,7 @@
 #define GNTTAB_HEADER_SIGNATURE 'TTNG'
 
 #define GNTTAB_MAXIMUM_FRAME_COUNT  1
-#define GNTTAB_ENTRY_PER_FRAME      (PAGE_SIZE / sizeof (grant_entry_v2_t))
-#define GNTTAB_STATUS_PER_FRAME     (PAGE_SIZE / sizeof (grant_status_t))
+#define GNTTAB_ENTRY_PER_FRAME      (PAGE_SIZE / sizeof (grant_entry_v1_t))
 
 #define GNTTAB_RESERVED_ENTRY_COUNT 8
 
@@ -71,12 +70,11 @@
 
 typedef struct _GNTTAB_REFERENCE_DESCRIPTOR {
     ULONG               Next;   // next free entry
-    grant_entry_v2_t    Entry;  // local copy of grant entry
+    grant_entry_v1_t    Entry;  // local copy of grant entry
 } GNTTAB_REFERENCE_DESCRIPTOR, *PGNTTAB_REFERENCE_DESCRIPTOR;
 
 typedef struct _XENBUS_GNTTAB_CONTEXT {
-    grant_entry_v2_t*           Entry;  // mapped page
-    grant_status_t*             Status; // mapped page
+    grant_entry_v1_t*           Entry;  // mapped page
     GNTTAB_REFERENCE_DESCRIPTOR Descriptor[GNTTAB_MAX_DESCRIPTOR]; // free list
     ULONG                       HeadFreeReference; // head free list
     ULONG                       Count;  // number in use
@@ -85,9 +83,8 @@ typedef struct _XENBUS_GNTTAB_CONTEXT {
 static XENBUS_GNTTAB_CONTEXT    GnttabContext;
 
 #define MAXIMUM_GRANT_ENTRY_PAGES   1
-#define MAXIMUM_GRANT_STATUS_PAGES  1
 // Entry(s), Status(s)
-#define MAXIMUM_GRANT_PAGES (MAXIMUM_GRANT_ENTRY_PAGES + MAXIMUM_GRANT_STATUS_PAGES)
+#define MAXIMUM_GRANT_PAGES (MAXIMUM_GRANT_ENTRY_PAGES)
 
 __declspec(allocate(".gnttab_section"))
 static UCHAR __GnttabSection[(MAXIMUM_GRANT_PAGES + 1) * PAGE_SIZE];
@@ -100,69 +97,6 @@ __VirtToPfn(
 {
     PHYSICAL_ADDRESS PhysAddr = MmGetPhysicalAddress(VirtAddr);
     return (PFN_NUMBER)(ULONG_PTR)(PhysAddr.QuadPart >> PAGE_SHIFT);
-}
-
-static FORCEINLINE LONG_PTR
-GrantTableOp(
-    IN  ULONG   Command,
-    IN  PVOID   Argument,
-    IN  ULONG   Count
-    )
-{
-    return Hypercall3(ULONG, grant_table_op, Command, Argument, Count);
-}
-
-static FORCEINLINE NTSTATUS
-__GetVersion(
-    OUT PULONG                  Version
-    )
-{
-    struct gnttab_get_version   op;
-    LONG_PTR                    rc;
-    NTSTATUS                    status;
-
-    op.dom = DOMID_SELF;
-
-    rc = GrantTableOp(GNTTABOP_get_version, &op, 1);
-
-    if (rc < 0) {
-        ERRNO_TO_STATUS(-rc, status);
-        goto fail1;
-    }
-
-    *Version = op.version;
-
-    return STATUS_SUCCESS;
-
-fail1:
-    LogError("fail1 (%08x)\n", status);
-
-    return status;
-}
-static FORCEINLINE NTSTATUS
-__SetVersion(
-    IN  ULONG                   Version
-    )
-{
-    struct gnttab_set_version   op;
-    LONG_PTR                    rc;
-    NTSTATUS                    status;
-
-    op.version = Version;
-
-    rc = GrantTableOp(GNTTABOP_set_version, &op, 1);
-
-    if (rc < 0) {
-        ERRNO_TO_STATUS(-rc, status);
-        goto fail1;
-    }
-
-    return STATUS_SUCCESS;
-
-fail1:
-    LogError("fail1 (%08x)\n", status);
-
-    return status;
 }
 
 NTSTATUS
@@ -221,23 +155,23 @@ GnttabPermitForeignAccess(
     )
 {
     PGNTTAB_REFERENCE_DESCRIPTOR    Descriptor;
-    grant_entry_v2_t                *Entry;
+    grant_entry_v1_t                *Entry;
 
     ASSERT(!GNTTAB_IS_INVALID_REFERENCE(Reference));
     ASSERT(!GNTTAB_IS_OUT_OF_RANGE_REFERENCE(Reference));
 
     Descriptor = &GnttabContext.Descriptor[Reference];
 
-    Descriptor->Entry.full_page.hdr.domid = Domain;
-    Descriptor->Entry.full_page.hdr.flags = (ReadOnly) ? GTF_readonly : 0;
-    Descriptor->Entry.full_page.frame = Frame;
+    Descriptor->Entry.domid = Domain;
+    Descriptor->Entry.flags = (ReadOnly) ? GTF_readonly : 0;
+    Descriptor->Entry.frame = (uint32_t)Frame;
 
     Entry = &GnttabContext.Entry[Reference];
 
     *Entry = Descriptor->Entry;
     KeMemoryBarrier();
 
-    Entry->hdr.flags |= GTF_permit_access;
+    Entry->flags |= GTF_permit_access;
     _ReadWriteBarrier();
 }
 
@@ -246,25 +180,25 @@ GnttabRevokeForeignAccess(
     IN  ULONG                       Reference
     )
 {
-    grant_entry_v2_t                *Entry;
+    grant_entry_v1_t                *Entry;
+    volatile SHORT                  *Flags;
     PGNTTAB_REFERENCE_DESCRIPTOR    Descriptor;
     ULONG                           Attempt;
 
     Entry = &GnttabContext.Entry[Reference];
-
-    Entry->hdr.flags = 0;
-    _ReadWriteBarrier();
-
-    KeMemoryBarrier();
+    Flags = (volatile SHORT *)&Entry->flags;
 
     Attempt = 0;
     while (Attempt++ < 100) {
-        grant_status_t  Status;
+        uint16_t    Old;
+        uint16_t    New;
 
-        Status = GnttabContext.Status[Reference];
-        _ReadWriteBarrier();
+        Old = *Flags;
+        Old &= ~(GTF_reading | GTF_writing);
 
-        if ((Status & (GTF_reading | GTF_writing)) == 0)
+        New = Old & ~GTF_permit_access;
+
+        if (InterlockedCompareExchange16(Flags, New, Old) == Old)
             break;
 
         _mm_pause();
@@ -272,9 +206,10 @@ GnttabRevokeForeignAccess(
     if (Attempt == 100)
         LogWarning("Reference %08x is still busy\n");
 
-    Descriptor = &GnttabContext.Descriptor[Reference];
-    RtlZeroMemory(&Descriptor->Entry, sizeof (grant_entry_v2_t));
+    RtlZeroMemory(Entry, sizeof(grant_entry_v1_t));
 
+    Descriptor = &GnttabContext.Descriptor[Reference];
+    RtlZeroMemory(&Descriptor->Entry, sizeof (grant_entry_v1_t));
 }
 
 static FORCEINLINE PVOID
@@ -292,45 +227,21 @@ GnttabInitialize(
     )
 {
     PFN_NUMBER              Pfn;
-    ULONG                   Version;
     NTSTATUS                Status;
     ULONG                   Reference;
 
     LogTrace("===>\n");
 
-    // set grant version to 2
-    Version = 2;
-    Status = __SetVersion(Version);
-    if (!NT_SUCCESS(Status))
-        goto fail1;
-
-    //  test grant version (protected, so will fail)
-    Status = __GetVersion(&Version);
-    if (!NT_SUCCESS(Status))
-        LogWarning("Failed to verify grant table version\n");
-    else
-        ASSERT3U(Version, ==, 2);
-
-    // map __GnttabSection[0] to grant_ref_v2_t's
+    // map __GnttabSection[0] to grant_ref_v1_t's
     GnttabContext.Entry = __Round(&__GnttabSection[0], PAGE_SIZE);
     Pfn = __VirtToPfn(GnttabContext.Entry);
     Status = HvmAddToPhysMap(Pfn,
                              XENMAPSPACE_grant_table,
                              0); // Page0
     if (!NT_SUCCESS(Status))
-        goto fail2;
-    LogVerbose("grant_entry_v2_t* : %p\n", GnttabContext.Entry);
+        goto fail1;
+    LogVerbose("grant_entry_v1_t* : %p\n", GnttabContext.Entry);
 
-    // map __GnttabSection[1] to grant_status_t's
-    GnttabContext.Status = __Round(&__GnttabSection[1], PAGE_SIZE);
-    Pfn = __VirtToPfn(GnttabContext.Status);
-    Status = HvmAddToPhysMap(Pfn,
-                             XENMAPSPACE_grant_table,
-                             0 | XENMAPIDX_grant_table_status); // Page0 (status)
-    if (!NT_SUCCESS(Status))
-        goto fail3;
-    LogVerbose("grant_status_t*   : %p\n", GnttabContext.Status);
-    
     // initialize free list
     LogVerbose("adding refrences [%08x - %08x]\n", GNTTAB_RESERVED_ENTRY_COUNT, GNTTAB_ENTRY_PER_FRAME - 1);
 
@@ -347,10 +258,6 @@ GnttabInitialize(
     LogTrace("<===\n");
     return STATUS_SUCCESS;
 
-fail3:
-    LogError("Fail3\n");
-fail2:
-    LogError("Fail2\n");
 fail1:
     LogError("Fail1 (%08x)\n", Status);
     return Status;
