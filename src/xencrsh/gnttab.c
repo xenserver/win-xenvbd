@@ -84,7 +84,7 @@ static XENBUS_GNTTAB_CONTEXT    GnttabContext;
 
 #define MAXIMUM_GRANT_ENTRY_PAGES   1
 // Entry(s), Status(s)
-#define MAXIMUM_GRANT_PAGES (MAXIMUM_GRANT_ENTRY_PAGES)
+#define MAXIMUM_GRANT_PAGES 1
 
 __declspec(allocate(".gnttab_section"))
 static UCHAR __GnttabSection[(MAXIMUM_GRANT_PAGES + 1) * PAGE_SIZE];
@@ -172,7 +172,7 @@ GnttabPermitForeignAccess(
     KeMemoryBarrier();
 
     Entry->flags |= GTF_permit_access;
-    _ReadWriteBarrier();
+    KeMemoryBarrier();
 }
 
 VOID
