@@ -353,15 +353,16 @@ FdoAdapterControl(
     if (_l->MaxControlType > _i)    _l->SupportedTypeList[_i] = _v;
 
             SET_SUPPORTED(List, 0, TRUE);   // ScsiQuerySupportedControlTypes
-            SET_SUPPORTED(List, 1, FALSE);  // ScsiStopAdapter
-            SET_SUPPORTED(List, 2, FALSE);  // ScsiRestartAdapter
-            SET_SUPPORTED(List, 3, FALSE);  // ScsiSetBootConfig
-            SET_SUPPORTED(List, 4, FALSE);  // ScsiSetRunningConfig
+            SET_SUPPORTED(List, 1, TRUE);   // ScsiStopAdapter
+            SET_SUPPORTED(List, 2, TRUE);   // ScsiRestartAdapter
+            SET_SUPPORTED(List, 3, TRUE);   // ScsiSetBootConfig
+            SET_SUPPORTED(List, 4, TRUE);   // ScsiSetRunningConfig
 
 #undef SET_SUPPORTED
 
         } break;
     default:
+        LogVerbose("%s\n", ScsiAdapterControlTypeName(ControlType));
         break;
     }
     LogTrace("%s <=== ScsiAdapterControlSuccess (Irql=%d)\n", ScsiAdapterControlTypeName(ControlType), KeGetCurrentIrql());
@@ -425,14 +426,17 @@ FdoBuildIo(
 
         // dont pass to StartIo
     case SRB_FUNCTION_ABORT_COMMAND:
+        LogVerbose("SRB_FUNCTION_ABORT_COMMAND -> SRB_STATUS_ABORT_FAILED\n");
         Srb->SrbStatus = SRB_STATUS_ABORT_FAILED;
         break;
     case SRB_FUNCTION_RESET_BUS:
+        LogVerbose("SRB_FUNCTION_RESET_BUS -> SRB_STATUS_SUCCESS\n");
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
         FdoResetBus(Fdo);
         break;
         
     default:
+        LogVerbose("Ignoring SRB %02x\n", Srb->Function);
         break;
     }
     
@@ -473,6 +477,8 @@ FdoStartIo(
     if (Pdo) {
         CompleteSrb = PdoStartIo(Pdo, Srb);
         PdoDereference(Pdo);
+    } else {
+        LogVerbose("No PDO for SRB %s\n", SrbFunctionName(Srb->Function));
     }
 
     if (CompleteSrb) {

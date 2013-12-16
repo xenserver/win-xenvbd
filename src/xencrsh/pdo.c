@@ -71,6 +71,11 @@ struct _XENVBD_PDO {
     SRB_QUEUE                   PreparedSrbs;
     SRB_QUEUE                   SubmittedSrbs;
     SRB_QUEUE                   ShutdownSrbs;
+
+    // Stats
+    ULONG                       Reads;
+    ULONG                       Writes;
+    ULONG                       Others;
 };
 
 //=============================================================================
@@ -247,6 +252,24 @@ __CleanupSrb(
 
 //=============================================================================
 // Preparing Requests
+static FORCEINLINE VOID
+__UpdateStats(
+    __in PXENVBD_PDO             Pdo,
+    __in UCHAR                   Operation
+    )
+{
+    switch (Operation) {
+    case BLKIF_OP_READ:
+        Pdo->Reads++;
+        break;
+    case BLKIF_OP_WRITE:
+        Pdo->Writes++;
+        break;
+    default:
+        Pdo->Other++;
+        break;
+    }
+}
 static FORCEINLINE ULONG
 __Min(
     IN  ULONG                   Val1,
@@ -504,6 +527,7 @@ PrepareReadWrite(
     }
 
 done:
+    __UpdateStats(Pdo, Operation);
     QueueInsertTail(&Pdo->PreparedSrbs, Srb);
     return STATUS_SUCCESS;
 }
@@ -525,6 +549,7 @@ PrepareSyncCache(
     Request->FirstSector    = Cdb_LogicalBlock(Srb);
     Request->NrSectors      = 0;
 
+    __UpdateStats(Pdo, BLKIF_OP_WRITE_BARRIER);
     QueueInsertTail(&Pdo->PreparedSrbs, Srb);
 }
 
@@ -629,22 +654,28 @@ PdoCompleteSubmittedRequest(
     switch (Request->Operation) {
     case BLKIF_OP_READ:
     case BLKIF_OP_WRITE:
-        // cleanup buffers
+        // cleanup buffers (LogVerbose is too verbose!)
+        //LogVerbose("%s : (%d, %lld @ %lld)\n",
+        //            Request->Operation == BLKIF_OP_READ ? "READ " : "WRITE",
+        //            Status, Request->NrSectors, Request->FirstSector);
         __CleanupRequest(Request, TRUE);
         break;
     case BLKIF_OP_WRITE_BARRIER:
+        LogVerbose("BARRIER\n");
         if (Status == BLKIF_RSP_EOPNOTSUPP) {
             // remove supported feature
             Pdo->Frontend.FeatureBarrier = FALSE;
         }
         break;
     case BLKIF_OP_DISCARD:
+        LogVerbose("DISCARD\n");
         if (Status == BLKIF_RSP_EOPNOTSUPP) {
             // remove supported feature
             Pdo->Frontend.FeatureDiscard = FALSE;
         }
         break;
     default:
+        LogVerbose("OTHER\n");
         ASSERT(FALSE);
         break;
     }
@@ -930,6 +961,16 @@ PdoReadCapacity16(
 
 //=============================================================================
 // StorPort Methods
+static FORCEINLINE VOID
+__DisplayStats(
+    IN  PXENVBD_PDO             Pdo
+    )
+{
+    LogVerbose("Target[%d] : BLKIF_OP_'s Reads %d / Writes %d / Others %d\n",
+                Pdo->Frontend.TargetId,
+                Pdo->Reads, Pdo->Writes, Pdo->Others);
+    Pdo->Reads = Pdo->Writes = Pdo->Others = 0;
+}
 static VOID
 __AbortSrbQueue(
     IN  PSRB_QUEUE              Queue,
@@ -965,25 +1006,32 @@ PdoExecuteScsi(
         break;
         
     case SCSIOP_SYNCHRONIZE_CACHE:
+        LogVerbose("SCSIOP_SYNCHRONIZE_CACHE\n");
         return PdoSyncCache(Pdo, Srb);
         break;
 
     case SCSIOP_INQUIRY:
+        LogVerbose("SCSIOP_INQUIRY\n");
         PdoInquiry(Pdo->Frontend.Inquiry, Srb);
         break;
     case SCSIOP_MODE_SENSE:
+        LogVerbose("SCSIOP_MODE_SENSE\n");
         PdoModeSense(Pdo, Srb);
         break;
     case SCSIOP_REQUEST_SENSE:
+        LogVerbose("SCSIOP_REQUEST_SENSE\n");
         PdoRequestSense(Pdo, Srb);
         break;
     case SCSIOP_REPORT_LUNS:
+        LogVerbose("SCSIOP_REPORT_LUNS\n");
         PdoReportLuns(Pdo, Srb);
         break;
     case SCSIOP_READ_CAPACITY:
+        LogVerbose("SCSIOP_READ_CAPACITY\n");
         PdoReadCapacity(Pdo, Srb);
         break;
     case SCSIOP_READ_CAPACITY16:
+        LogVerbose("SCSIOP_READ_CAPACITY16\n");
         PdoReadCapacity16(Pdo, Srb);
         break;
     case SCSIOP_MEDIUM_REMOVAL:
@@ -994,14 +1042,12 @@ PdoExecuteScsi(
     case SCSIOP_RELEASE_UNIT10:
     case SCSIOP_VERIFY:
     case SCSIOP_VERIFY16:
-        Srb->SrbStatus = SRB_STATUS_SUCCESS;
-        break;
     case SCSIOP_START_STOP_UNIT:
-        LogTrace("Target[%d] : Start/Stop Unit (%02X)\n", Pdo->Frontend.TargetId, Srb->Cdb[4]);
+        LogVerbose("Target[%d] : (%02x:%s)\n", Pdo->Frontend.TargetId, Operation, Cdb_OperationName(Operation));
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
         break;
     default:
-        LogTrace("Target[%d] : Unsupported CDB (%02x:%s)\n", Pdo->Frontend.TargetId, Operation, Cdb_OperationName(Operation));
+        LogVerbose("Target[%d] : (%02x:%s) Unsupported\n", Pdo->Frontend.TargetId, Operation, Cdb_OperationName(Operation));
         break;
     }
     //LogVerbose("Target[%d] <==== %02x:%s\n", Pdo->Frontend.TargetId, Operation, Cdb_OperationName(Operation));
@@ -1013,6 +1059,7 @@ PdoQueueShutdown(
     IN  PSCSI_REQUEST_BLOCK     Srb
     )
 {
+    LogVerbose("Target[%d] : shutdown\n", Pdo->Frontend.TargetId);
     QueueInsertTail(&Pdo->ShutdownSrbs, Srb);
     EventChannelSend(Pdo->Frontend.EvtchnPort);
 }
@@ -1061,15 +1108,18 @@ ValidateSrbForPdo(
     )
 {
     if (Srb->PathId != 0) {
+        LogVerbose("(%02x) Srb->PathId(%d) != 0 -> SRB_STATUS_INVALID_PATH_ID\n", Srb->Function, Srb->PathId);
         Srb->SrbStatus = SRB_STATUS_INVALID_PATH_ID;
         return FALSE;
     }
     if (Srb->Lun != 0) {
+        LogVerbose("(%02x) Srb->Lun(%d) != 0 -> SRB_STATUS_INVALID_LUN\n", Srb->Function, Srb->Lun);
         Srb->SrbStatus = SRB_STATUS_INVALID_LUN;
         return FALSE;
     }
 
     if (Pdo == NULL) {
+        LogVerbose("(%02x) Pdo == NULL -> SRB_STATUS_INVALID_TARGET_ID\n", Srb->Function);
         Srb->SrbStatus = SRB_STATUS_INVALID_TARGET_ID;
         return FALSE;
     }
@@ -1090,18 +1140,23 @@ PdoStartIo(
         return PdoExecuteScsi(Pdo, Srb);
 
     case SRB_FUNCTION_RESET_DEVICE:
+        LogVerbose("SRB_FUNCTION_RESET_DEVICE\n");
         PdoReset(Pdo);
         return TRUE;
 
     case SRB_FUNCTION_FLUSH:
+        LogVerbose("SRB_FUNCTION_FLUSH\n");
         PdoQueueShutdown(Pdo, Srb);
         return FALSE;
 
     case SRB_FUNCTION_SHUTDOWN:
+        LogVerbose("SRB_FUNCTION_SHUTDOWN\n");
+        __DisplayStats(Pdo);
         PdoQueueShutdown(Pdo, Srb);
         return FALSE;
 
     default:
+        LogVerbose("Unhandled SRB %02x\n", Srb->Function);
         return TRUE;
     }
 }
