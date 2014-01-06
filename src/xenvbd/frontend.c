@@ -1018,9 +1018,6 @@ __FrontendSetState(
                 __XenvbdStateName(State));
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
     
-    if (State == XENVBD_INITIALIZED)
-        goto ignore;
-
     while (!Failed && Frontend->State != State) {
         switch (Frontend->State) {
         case XENVBD_INITIALIZED:
@@ -1044,6 +1041,12 @@ __FrontendSetState(
 
         case XENVBD_CLOSED:
             switch (State) {
+            case XENVBD_INITIALIZED:
+                // ONLY Closed->Initialized is valid, which can occur with a very early resume from suspend
+                // i.e. VM was suspended before the Initianized->Closed transition, and each resume needs
+                //      the Close transition to properly close the frontend and backend devices.
+                Frontend->State = XENVBD_INITIALIZED;
+                break;
             case XENVBD_PREPARED:
             case XENVBD_CONNECTED:
             case XENVBD_ENABLED:
@@ -1141,10 +1144,6 @@ __FrontendSetState(
     }
     Trace("Target[%d] @ (%d) <===== (%s)\n", TargetId, KeGetCurrentIrql(), Failed ? "FAILED" : "SUCCEEDED");
     return Failed ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
-
-ignore:
-    Verbose("Target[%d] : %s -> INITIALIZED is invalid, ignoring transition\n", TargetId, __XenvbdStateName(Frontend->State));
-    return STATUS_SUCCESS;
 }
 
 __drv_requiresIRQL(DISPATCH_LEVEL)
