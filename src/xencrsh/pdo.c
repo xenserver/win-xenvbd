@@ -266,7 +266,7 @@ __UpdateStats(
         Pdo->Writes++;
         break;
     default:
-        Pdo->Other++;
+        Pdo->Others++;
         break;
     }
 }

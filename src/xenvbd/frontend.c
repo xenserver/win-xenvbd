@@ -1017,6 +1017,9 @@ __FrontendSetState(
                 __XenvbdStateName(Frontend->State), 
                 __XenvbdStateName(State));
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+    
+    if (State == XENVBD_INITIALIZED)
+        goto ignore;
 
     while (!Failed && Frontend->State != State) {
         switch (Frontend->State) {
@@ -1138,6 +1141,10 @@ __FrontendSetState(
     }
     Trace("Target[%d] @ (%d) <===== (%s)\n", TargetId, KeGetCurrentIrql(), Failed ? "FAILED" : "SUCCEEDED");
     return Failed ? STATUS_UNSUCCESSFUL : STATUS_SUCCESS;
+
+ignore:
+    Verbose("Target[%d] : %s -> INITIALIZED is invalid, ignoring transition\n", TargetId, __XenvbdStateName(Frontend->State));
+    return STATUS_SUCCESS;
 }
 
 __drv_requiresIRQL(DISPATCH_LEVEL)
