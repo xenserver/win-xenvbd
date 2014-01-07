@@ -1017,7 +1017,7 @@ __FrontendSetState(
                 __XenvbdStateName(Frontend->State), 
                 __XenvbdStateName(State));
     ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
-
+    
     while (!Failed && Frontend->State != State) {
         switch (Frontend->State) {
         case XENVBD_INITIALIZED:
@@ -1041,6 +1041,12 @@ __FrontendSetState(
 
         case XENVBD_CLOSED:
             switch (State) {
+            case XENVBD_INITIALIZED:
+                // ONLY Closed->Initialized is valid, which can occur with a very early resume from suspend
+                // i.e. VM was suspended before the Initianized->Closed transition, and each resume needs
+                //      the Close transition to properly close the frontend and backend devices.
+                Frontend->State = XENVBD_INITIALIZED;
+                break;
             case XENVBD_PREPARED:
             case XENVBD_CONNECTED:
             case XENVBD_ENABLED:
