@@ -52,8 +52,8 @@ typedef struct _XENVBD_SEGMENT {
 
 // Request - extension of blkif_request_t
 typedef struct _XENVBD_REQUEST {
-    LIST_ENTRY          Entry;          // XENVBD_SRBEXT.RequestList (list item)
-    PSCSI_REQUEST_BLOCK Srb;            // XENVBD_SRBEXT.Srb
+    PSCSI_REQUEST_BLOCK Srb;
+    LIST_ENTRY          Entry;
 
     UCHAR               Operation;
     UCHAR               NrSegments;
@@ -64,11 +64,9 @@ typedef struct _XENVBD_REQUEST {
 
 // SRBExtension - context for SRBs
 typedef struct _XENVBD_SRBEXT {
-    PSCSI_REQUEST_BLOCK     Srb;        // Srb->SrbExtension == this
-    PVOID                   QueueHead;  // -> SRB_QUEUE
-    LIST_ENTRY              QueueEntry; // -> SRB_QUEUE.List (list item)
-    LIST_ENTRY              RequestList;// -> XENVBD_REQUEST.Entry (list head)
-    LONG                    RequestSize;// (list size)
+    PSCSI_REQUEST_BLOCK     Srb;
+    LIST_ENTRY              Entry;
+    LONG                    Count;
 } XENVBD_SRBEXT, *PXENVBD_SRBEXT;
 
 FORCEINLINE PXENVBD_SRBEXT
@@ -81,6 +79,19 @@ GetSrbExt(
         return Srb->SrbExtension;
     }
     return NULL;
+}
+
+FORCEINLINE VOID
+InitSrbExt(
+    __in PSCSI_REQUEST_BLOCK    Srb
+    )
+{
+    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    if (SrbExt) {
+        RtlZeroMemory(SrbExt, sizeof(XENVBD_SRBEXT));
+        SrbExt->Srb = Srb;
+    }
+    Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
 }
 
 #endif // _XENVBD_SRBEXT_H

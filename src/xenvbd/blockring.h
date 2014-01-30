@@ -92,7 +92,7 @@ BlockRingPoll(
 extern BOOLEAN
 BlockRingSubmit(
     IN  PXENVBD_BLOCKRING           BlockRing,
-    IN  PSCSI_REQUEST_BLOCK         Srb
+    IN  PXENVBD_REQUEST             Request
     );
 
 extern BOOLEAN

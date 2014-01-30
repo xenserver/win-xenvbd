@@ -298,10 +298,10 @@ FrontendNotifyResponses(
 BOOLEAN
 FrontendSubmitRequest(
     __in  PXENVBD_FRONTEND          Frontend,
-    __in  PSCSI_REQUEST_BLOCK       Srb
+    __in  PXENVBD_REQUEST           Request
     )
 {
-    return BlockRingSubmit(Frontend->BlockRing, Srb);
+    return BlockRingSubmit(Frontend->BlockRing, Request);
 }
 
 VOID

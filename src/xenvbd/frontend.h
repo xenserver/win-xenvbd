@@ -147,7 +147,7 @@ FrontendNotifyResponses(
 extern BOOLEAN
 FrontendSubmitRequest(
     __in  PXENVBD_FRONTEND          Frontend,
-    __in  PSCSI_REQUEST_BLOCK       Srb
+    __in  PXENVBD_REQUEST           Request
     );
 
 extern VOID

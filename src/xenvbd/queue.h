@@ -33,68 +33,55 @@
 #define _XENVBD_QUEUE_H
 
 #include <wdm.h>
-#include <xenvbd-storport.h>
 #include <debug_interface.h>
 
-typedef struct _SRB_QUEUE {
+typedef struct _XENVBD_QUEUE {
     KSPIN_LOCK          Lock;
     LIST_ENTRY          List;
-    ULONG               Count;
-    ULONG               MaxCount;
-} SRB_QUEUE, *PSRB_QUEUE;
+    ULONG               Current;
+    ULONG               Maximum;
+} XENVBD_QUEUE, *PXENVBD_QUEUE;
 
 extern VOID
 QueueInit(
-    __in PSRB_QUEUE          Queue
+    __in PXENVBD_QUEUE      Queue
     );
 
 extern ULONG
 QueueCount(
-    __in PSRB_QUEUE          Queue
+    __in PXENVBD_QUEUE      Queue
     );
 
 __checkReturn
-extern PSCSI_REQUEST_BLOCK
-QueuePeek(
-    __in PSRB_QUEUE          Queue
-    );
-
-__checkReturn
-extern PSCSI_REQUEST_BLOCK
+extern PLIST_ENTRY
 QueuePop(
-    __in PSRB_QUEUE          Queue
-    );
-
-__checkReturn
-extern PSCSI_REQUEST_BLOCK
-QueueRemoveTail(
-    __in PSRB_QUEUE          Queue
+    __in PXENVBD_QUEUE      Queue
     );
 
 extern VOID
-QueueInsertHead(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
+QueueUnPop(
+    __in PXENVBD_QUEUE      Queue,
+    __in PLIST_ENTRY        Entry
     );
 
 extern VOID
-QueueInsertTail(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
+QueueAppend(
+    __in PXENVBD_QUEUE      Queue,
+    __in PLIST_ENTRY        Entry
     );
 
 extern VOID
 QueueRemove(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
+    __in PXENVBD_QUEUE      Queue,
+    __in PLIST_ENTRY        Entry
     );
 
 extern VOID
 QueueDebugCallback(
-    __in PSRB_QUEUE          Queue,
-    __in __nullterminated const CHAR *Name,
-    __in PXENBUS_DEBUG_INTERFACE Debug,
-    __in PXENBUS_DEBUG_CALLBACK  Callback
+    __in PXENVBD_QUEUE                  Queue,
+    __in __nullterminated const CHAR*   Name,
+    __in PXENBUS_DEBUG_INTERFACE        Debug,
+    __in PXENBUS_DEBUG_CALLBACK         Callback
     );
 
 #endif // _XENVBD_QUEUE_H

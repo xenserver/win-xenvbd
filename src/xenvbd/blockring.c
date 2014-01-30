@@ -100,21 +100,62 @@ xen_wmb()
     _WriteBarrier();
 }
 
-static FORCEINLINE LONG
-__RingSlotsAvailable(
-    __in  blkif_front_ring_t*       FrontRing
-    )
-{
-    // RING_PROD_SLOTS_AVAIL(...)
-    return (LONG)( FrontRing->nr_ents - (FrontRing->req_prod_pvt - FrontRing->rsp_cons) );
-}
-
 static FORCEINLINE PFN_NUMBER
 __Pfn(
     __in  PVOID                   VirtAddr
     )
 {
     return (PFN_NUMBER)(ULONG_PTR)(MmGetPhysicalAddress(VirtAddr).QuadPart >> PAGE_SHIFT);
+}
+
+static FORCEINLINE VOID
+__BlockRingInsert(
+    IN  PXENVBD_BLOCKRING           BlockRing,
+    IN  PXENVBD_REQUEST             Request,
+    IN  blkif_request_t*            req
+    )
+{
+    ULONG                       Index;
+    blkif_request_discard_t*    req_discard;
+
+    switch (Request->Operation) {
+    case BLKIF_OP_DISCARD:
+        req_discard = (blkif_request_discard_t*)req;
+        req_discard->operation       = BLKIF_OP_DISCARD;
+        req_discard->handle          = (USHORT)BlockRing->DeviceId;
+        req_discard->id              = (ULONG64)Request;
+        req_discard->sector_number   = Request->FirstSector;
+        req_discard->nr_sectors      = Request->NrSectors;
+        break;
+
+    case BLKIF_OP_READ:
+    case BLKIF_OP_WRITE:
+        req->operation          = Request->Operation;
+        req->nr_segments        = Request->NrSegments;
+        req->handle             = (USHORT)BlockRing->DeviceId;
+        req->id                 = (ULONG64)Request;
+        req->sector_number      = Request->FirstSector;
+        for (Index = 0; Index < Request->NrSegments; ++Index) {
+            req->seg[Index].gref       = Request->Segments[Index].GrantRef;
+            req->seg[Index].first_sect = Request->Segments[Index].FirstSector;
+            req->seg[Index].last_sect  = Request->Segments[Index].LastSector;
+        }
+        break;
+
+    case BLKIF_OP_WRITE_BARRIER:
+        req->operation          = Request->Operation;
+        req->nr_segments        = 0;
+        req->handle             = (USHORT)BlockRing->DeviceId;
+        req->id                 = (ULONG64)Request;
+        req->sector_number      = Request->FirstSector;
+        break;
+
+    default:
+        ASSERT(FALSE);
+        break;
+    }
+    ++BlockRing->Submitted;
+    ++BlockRing->Outstanding;
 }
 
 NTSTATUS
@@ -433,74 +474,25 @@ done:
 BOOLEAN
 BlockRingSubmit(
     IN  PXENVBD_BLOCKRING           BlockRing,
-    IN  PSCSI_REQUEST_BLOCK         Srb
+    IN  PXENVBD_REQUEST             Request
     )
 {
-    KIRQL           Irql;
-    BOOLEAN         Submitted = FALSE;
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    KIRQL               Irql;
+    blkif_request_t*    req;
 
     KeAcquireSpinLock(&BlockRing->Lock, &Irql);
 
-    if (__RingSlotsAvailable(&BlockRing->FrontRing) > SrbExt->RequestSize) {
-        PLIST_ENTRY Entry;
-        for (Entry = SrbExt->RequestList.Flink;
-                Entry != &SrbExt->RequestList;
-                Entry = Entry->Flink) {
-            ULONG                       Index;
-            PXENVBD_REQUEST             Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-            blkif_request_t*            req;
-            blkif_request_discard_t*    req_discard;
-
-            req = RING_GET_REQUEST(&BlockRing->FrontRing, BlockRing->FrontRing.req_prod_pvt);
-            ++BlockRing->FrontRing.req_prod_pvt;
-
-            ++BlockRing->Submitted;
-            ++BlockRing->Outstanding;
-
-            switch (Request->Operation) {
-            case BLKIF_OP_DISCARD:
-                req_discard = (blkif_request_discard_t*)req;
-                req_discard->operation       = BLKIF_OP_DISCARD;
-                req_discard->handle          = (USHORT)BlockRing->DeviceId;
-                req_discard->id              = (ULONG64)Request;
-                req_discard->sector_number   = Request->FirstSector;
-                req_discard->nr_sectors      = Request->NrSectors;
-                break;
-
-            case BLKIF_OP_READ:
-            case BLKIF_OP_WRITE:
-                req->operation          = Request->Operation;
-                req->nr_segments        = Request->NrSegments;
-                req->handle             = (USHORT)BlockRing->DeviceId;
-                req->id                 = (ULONG64)Request;
-                req->sector_number      = Request->FirstSector;
-                for (Index = 0; Index < Request->NrSegments; ++Index) {
-                    req->seg[Index].gref       = Request->Segments[Index].GrantRef;
-                    req->seg[Index].first_sect = Request->Segments[Index].FirstSector;
-                    req->seg[Index].last_sect  = Request->Segments[Index].LastSector;
-                }
-                break;
-
-            case BLKIF_OP_WRITE_BARRIER:
-                req->operation          = Request->Operation;
-                req->nr_segments        = 0;
-                req->handle             = (USHORT)BlockRing->DeviceId;
-                req->id                 = (ULONG64)Request;
-                req->sector_number      = Request->FirstSector;
-                break;
-
-            default:
-                ASSERT(FALSE);
-                break; 
-            }
-        }
-        Submitted = TRUE;
+    if (RING_FULL(&BlockRing->FrontRing)) {
+        KeReleaseSpinLock(&BlockRing->Lock, Irql);
+        return FALSE;
     }
 
-    KeReleaseSpinLock(&BlockRing->Lock, Irql);
+    req = RING_GET_REQUEST(&BlockRing->FrontRing, BlockRing->FrontRing.req_prod_pvt);
+    ++BlockRing->FrontRing.req_prod_pvt;
+    __BlockRingInsert(BlockRing, Request, req);
 
-    return Submitted;
+    KeReleaseSpinLock(&BlockRing->Lock, Irql);
+    return TRUE;
 }
 
 BOOLEAN

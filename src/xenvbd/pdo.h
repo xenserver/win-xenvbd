@@ -161,7 +161,7 @@ PdoIsPaused(
 
 __checkReturn
 extern ULONG
-PdoOutstandingSrbs(
+PdoOutstandingReqs(
     __in PXENVBD_PDO             Pdo
     );
 

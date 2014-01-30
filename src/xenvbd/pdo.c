@@ -86,10 +86,10 @@ struct _XENVBD_PDO {
     KEVENT                      RequestListEmpty;
     LONG                        RequestListUsed;
     NPAGED_LOOKASIDE_LIST       RequestList;
-    SRB_QUEUE                   FreshSrbs;
-    SRB_QUEUE                   PreparedSrbs;
-    SRB_QUEUE                   SubmittedSrbs;
-    SRB_QUEUE                   ShutdownSrbs;
+    XENVBD_QUEUE                FreshSrbs;
+    XENVBD_QUEUE                PreparedReqs;
+    XENVBD_QUEUE                SubmittedReqs;
+    XENVBD_QUEUE                ShutdownSrbs;
 
     // Stats
     ULONG                       OutstandingMappedPages;
@@ -226,8 +226,8 @@ PdoDebugCallback(
 
     FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->FreshSrbs, "Fresh", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->PreparedSrbs, "Prepared", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->SubmittedSrbs, "Submitted", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->PreparedReqs, "Prepared", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown", DebugInterface, DebugCallback);
 
     Pdo->OutstandingMappedPages = 0;
@@ -363,10 +363,11 @@ __PdoPauseDataPath(
     ++Pdo->Paused;
     KeReleaseSpinLock(&Pdo->Lock, Irql);
 
-    Verbose("Target[%d] : Waiting for %d Submitted SRBs\n", PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedSrbs));
+    Verbose("Target[%d] : Waiting for %d Submitted requests\n", PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedReqs));
 
     Timeout.QuadPart = -10000000;
-    while (QueueCount(&Pdo->SubmittedSrbs)) {
+    while (QueueCount(&Pdo->SubmittedReqs)) {
+        FrontendEvtchnSend(Pdo->Frontend); // let backend know it needs to do some work
         KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
     }
 }
@@ -420,8 +421,8 @@ PdoCreate(
 
     KeInitializeSpinLock(&Pdo->Lock);
     QueueInit(&Pdo->FreshSrbs);
-    QueueInit(&Pdo->PreparedSrbs);
-    QueueInit(&Pdo->SubmittedSrbs);
+    QueueInit(&Pdo->PreparedReqs);
+    QueueInit(&Pdo->SubmittedReqs);
     QueueInit(&Pdo->ShutdownSrbs);
 
     Status = FrontendCreate(Pdo, DeviceId, TargetId, FrontendEvent, &Pdo->Frontend);
@@ -562,6 +563,7 @@ PdoD0ToD3(
         __PdoPauseDataPath(Pdo);
         (VOID) FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
         PdoAbortAllSrbs(Pdo);
+        ASSERT3U(QueueCount(&Pdo->SubmittedReqs), ==, 0);
     }
 
     // power down frontend
@@ -629,8 +631,7 @@ PdoGetTargetId(
     __in PXENVBD_PDO             Pdo
     )
 {
-    if (Pdo == NULL)    
-        return 0;
+    ASSERT3P(Pdo, !=, NULL);
     return FrontendGetTargetId(Pdo->Frontend);
 }
 
@@ -674,11 +675,11 @@ PdoIsPaused(
 
 __checkReturn
 FORCEINLINE ULONG
-PdoOutstandingSrbs(
+PdoOutstandingReqs(
     __in PXENVBD_PDO             Pdo
     )
 {
-    return QueueCount(&Pdo->SubmittedSrbs);
+    return QueueCount(&Pdo->SubmittedReqs);
 }
 
 __checkReturn
@@ -804,25 +805,6 @@ __CleanupRequest(
             Request->Segments[Index].Length = 0;
         }
     }
-}
-static VOID
-__CleanupSrb(
-    __in PXENVBD_PDO             Pdo,
-    __in PSCSI_REQUEST_BLOCK     Srb
-    )
-{
-    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
-    PLIST_ENTRY         Entry;
-
-    if (SrbExt == NULL)
-        return;
-    while ((Entry = RemoveHeadList(&SrbExt->RequestList)) != &SrbExt->RequestList) {
-        PXENVBD_REQUEST Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-        __CleanupRequest(Pdo, Request, FALSE);
-        __FreeRequest(Pdo, Request);
-        InterlockedDecrement(&SrbExt->RequestSize);
-    }
-    ASSERT3S(SrbExt->RequestSize, ==, 0);
 }
 
 //=============================================================================
@@ -953,6 +935,7 @@ PrepareReadWrite(
     BOOLEAN         ReadOnly;
     ULONG           Index;
     ULONG           SectorsNow;
+    LIST_ENTRY      ReqList;
 
     PMDL             OriginalMDL;
     ULONG           GotMDL;
@@ -968,6 +951,8 @@ PrepareReadWrite(
     const ULONG     SectorsPerPage  = __SectorsPerPage(SectorSize);
     __Operation(Cdb_OperationEx(Srb), &Operation, &ReadOnly);
 
+    InitializeListHead(&ReqList);
+
     SGList = StorPortGetScatterGatherList(PdoGetFdo(Pdo), Srb);
     RtlZeroMemory(&SGIndex, sizeof(SGIndex));
     GotMDL = StorPortGetOriginalMdl(PdoGetFdo(Pdo), Srb, &OriginalMDL);
@@ -980,15 +965,15 @@ PrepareReadWrite(
         goto fail;
 
     SectorsDone = 0;
-    SrbExt->RequestSize = 0;
+    SrbExt->Count = 0;
     do {
         PXENVBD_REQUEST Request = __AllocRequest(Pdo);
         if (!Request) {
             Trace("Target[%d] : AllocRequest failed\n", PdoGetTargetId(Pdo));
             goto fail;
         }
-        InsertTailList(&SrbExt->RequestList, &Request->Entry);
-        InterlockedIncrement(&SrbExt->RequestSize);
+        InsertTailList(&ReqList, &Request->Entry);
+        InterlockedIncrement(&SrbExt->Count);
 
         Request->Srb        = Srb;
         Request->Operation  = Operation;
@@ -1123,11 +1108,26 @@ PrepareReadWrite(
 
 done:
     __UpdateStats(Pdo, Operation);
-    QueueInsertTail(&Pdo->PreparedSrbs, Srb);
+    for (;;) {
+        PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
+        if (Entry == &ReqList)
+            break;
+        QueueAppend(&Pdo->PreparedReqs, Entry);
+    }
     return STATUS_SUCCESS;
 
 fail:
-    __CleanupSrb(Pdo, Srb);
+    for (;;) {
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
+        if (Entry == &ReqList)
+            break;
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        __CleanupRequest(Pdo, Request, FALSE);
+        __FreeRequest(Pdo, Request);
+        InterlockedDecrement(&SrbExt->Count);
+    }
+    ASSERT3S(SrbExt->Count, ==, 0);
     return STATUS_UNSUCCESSFUL;
 }
 __checkReturn
@@ -1148,8 +1148,7 @@ PrepareSyncCache(
         Trace("Target[%d] : AllocRequests failed\n", PdoGetTargetId(Pdo));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    SrbExt->RequestSize = 1;
-    InsertHeadList(&SrbExt->RequestList, &Request->Entry);
+    SrbExt->Count = 1;
 
     Request->Srb = Srb;
 
@@ -1159,7 +1158,7 @@ PrepareSyncCache(
     Request->NrSectors      = 0;
 
     __UpdateStats(Pdo, BLKIF_OP_WRITE_BARRIER);
-    QueueInsertTail(&Pdo->PreparedSrbs, Srb);
+    QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
     return STATUS_SUCCESS;
 }
 
@@ -1171,23 +1170,23 @@ PdoPrepareFresh(
     )
 {
     ULONG   Count = 0;
-    for (;;) {
-        PSCSI_REQUEST_BLOCK     Srb;
-        NTSTATUS                Status;
 
-        Srb = QueuePop(&Pdo->FreshSrbs);
-        if (Srb == NULL) {
-            goto done;
-        }
+    for (;;) {
+        NTSTATUS        Status;
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->FreshSrbs);
+        if (Entry == NULL)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
 
         // popped a SRB, process it
-        switch (Cdb_OperationEx(Srb)) {
+        switch (Cdb_OperationEx(SrbExt->Srb)) {
         case SCSIOP_READ:
         case SCSIOP_WRITE:
-            Status = PrepareReadWrite(Pdo, Srb);
+            Status = PrepareReadWrite(Pdo, SrbExt->Srb);
             break;
         case SCSIOP_SYNCHRONIZE_CACHE:
-            Status = PrepareSyncCache(Pdo, Srb);
+            Status = PrepareSyncCache(Pdo, SrbExt->Srb);
             break;
         default:
             ASSERT(FALSE);
@@ -1199,11 +1198,11 @@ PdoPrepareFresh(
         if (NT_SUCCESS(Status)) {
             ++Count;
         } else {
-            QueueInsertHead(&Pdo->FreshSrbs, Srb);
-            goto done;
+            QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
+            break;
         }
     }
-done:
+
     return Count;
 }
 
@@ -1212,23 +1211,22 @@ PdoSubmitPrepared(
     __in PXENVBD_PDO             Pdo
     )
 {
-    ULONG                       Count = 0;
+    ULONG   Count = 0;
 
     for (;;) {
-        PSCSI_REQUEST_BLOCK Srb;
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->PreparedReqs);
+        if (Entry == NULL)
+            break;
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
 
-        Srb = QueuePop(&Pdo->PreparedSrbs);
-        if (Srb == NULL) {
+        if (!FrontendSubmitRequest(Pdo->Frontend, Request)) {
+            QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
             break;
         }
 
-        if (!FrontendSubmitRequest(Pdo->Frontend, Srb)) {
-            QueueInsertHead(&Pdo->PreparedSrbs, Srb);
-            break;
-        }
-
-        QueueInsertTail(&Pdo->SubmittedSrbs, Srb);
-        Srb->SrbStatus = SRB_STATUS_SUCCESS;
+        QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
+        Request->Srb->SrbStatus = SRB_STATUS_SUCCESS;
         ++Count;
 
         FrontendPushRequests(Pdo->Frontend);
@@ -1237,65 +1235,64 @@ PdoSubmitPrepared(
     return Count;
 }
 
-static FORCEINLINE VOID
-__PdoResetSrbToFresh(
-    __in PXENVBD_PDO             Pdo,
-    __in PSCSI_REQUEST_BLOCK     Srb
-    )
-{
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    __CleanupSrb(Pdo, Srb);
-
-    if (SrbExt) {
-        RtlZeroMemory(SrbExt, sizeof(XENVBD_SRBEXT));
-        InitializeListHead(&SrbExt->RequestList);
-        SrbExt->Srb = Srb;
-    }
-
-    Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-}
 VOID
 PdoPreResume(
     __in PXENVBD_PDO             Pdo
     )
 {
-    ULONG   Count;
+    LIST_ENTRY      List;
+    
+    InitializeListHead(&List);
 
-    // Move PreparedSrbs to FreshSrbs
-    Count = 0;
+    // pop all submitted requests, cleanup and add associated SRB to a list
     for (;;) {
-        PSCSI_REQUEST_BLOCK Srb;
-        
-        Srb = QueueRemoveTail(&Pdo->PreparedSrbs);
-        if (Srb == NULL)
+        PXENVBD_SRBEXT  SrbExt;
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->SubmittedReqs);
+        if (Entry == NULL)
             break;
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        SrbExt = GetSrbExt(Request->Srb);
 
-        ++Count;
-        __PdoResetSrbToFresh(Pdo, Srb);
+        __CleanupRequest(Pdo, Request, FALSE);
+        __FreeRequest(Pdo, Request);
 
-        QueueInsertHead(&Pdo->FreshSrbs, Srb);
-    }
-    Verbose("Target[%d] : Reverting %d Prepared SRBs to Fresh\n", 
-                PdoGetTargetId(Pdo), Count);
-
-    // Move SubmittedSrbs to FreshSrbs
-    Count = 0;
-    for (;;) {
-        PSCSI_REQUEST_BLOCK Srb;
-        
-        Srb = QueueRemoveTail(&Pdo->SubmittedSrbs);
-        if (Srb == NULL)
-            break;
-
-        ++Count;
-        __PdoResetSrbToFresh(Pdo, Srb);
-
-        QueueInsertHead(&Pdo->FreshSrbs, Srb);
+        if (InterlockedDecrement(&SrbExt->Count) == 0) {
+            InsertTailList(&List, &SrbExt->Entry);
+        }
     }
 
-    Verbose("Target[%d] : Reverting %d Submitted SRBs to Fresh\n", 
-                PdoGetTargetId(Pdo), Count);
+    // pop all prepared requests, cleanup and add associated SRB to a list
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->PreparedReqs);
+        if (Entry == NULL)
+            break;
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        SrbExt = GetSrbExt(Request->Srb);
+
+        __CleanupRequest(Pdo, Request, FALSE);
+        __FreeRequest(Pdo, Request);
+
+        if (InterlockedDecrement(&SrbExt->Count) == 0) {
+            InsertTailList(&List, &SrbExt->Entry);
+        }
+    }
+
+    // foreach SRB in list, put on start of FreshSrbs
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = RemoveTailList(&List);
+        if (Entry == &List)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+
+        QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
+    }
+
+    // now the first set of requests popped off submitted list is the next SRB 
+    // to be popped off the fresh list
 }
 
 VOID
@@ -1320,19 +1317,22 @@ PdoCompleteShutdown(
     __in PXENVBD_PDO             Pdo
     )
 {
-    PSCSI_REQUEST_BLOCK     Srb;
-
-    if (QueuePeek(&Pdo->ShutdownSrbs) == NULL)
+    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
         return;
 
-    if (QueuePeek(&Pdo->FreshSrbs) ||
-        QueuePeek(&Pdo->PreparedSrbs) ||
-        QueuePeek(&Pdo->SubmittedSrbs))
+    if (QueueCount(&Pdo->FreshSrbs) ||
+        QueueCount(&Pdo->PreparedReqs) ||
+        QueueCount(&Pdo->SubmittedReqs))
         return;
 
-    while ((Srb = QueuePop(&Pdo->ShutdownSrbs)) != NULL) {
-        Srb->SrbStatus = SRB_STATUS_SUCCESS;
-        FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
+        if (Entry == NULL)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
+        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
     }
 }
 
@@ -1389,28 +1389,23 @@ PdoCompleteSubmittedRequest(
         break;
     }
 
-    RemoveEntryList(&Request->Entry);
-    InterlockedDecrement(&SrbExt->RequestSize);
-
+    QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
     __FreeRequest(Pdo, Request);
 
     // complete srb
-    if (IsListEmpty(&SrbExt->RequestList)) {
-        ASSERT3S(SrbExt->RequestSize, ==, 0);
+    if (InterlockedDecrement(&SrbExt->Count) == 0) {
         if (Srb->SrbStatus == SRB_STATUS_SUCCESS) {
             Srb->ScsiStatus = 0x00; // SCSI_GOOD
         } else {
             Srb->ScsiStatus = 0x40; // SCSI_ABORTED
         }
 
-        QueueRemove(&Pdo->SubmittedSrbs, Srb);
         FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
     }
 }
 
 //=============================================================================
 // SRBs
-
 __checkReturn
 static FORCEINLINE BOOLEAN
 __ValidateSectors(
@@ -1455,8 +1450,9 @@ PdoReadWrite(
     __in PSCSI_REQUEST_BLOCK    Srb
     )
 {
-    NTSTATUS    Status;
+    NTSTATUS            Status;
     PXENVBD_DISKINFO    DiskInfo = FrontendGetDiskInfo(Pdo->Frontend);
+    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
 
     if (FrontendGetCaps(Pdo->Frontend)->Connected == FALSE) {
         Trace("Target[%d] : Not Ready, fail SRB\n", PdoGetTargetId(Pdo));
@@ -1477,7 +1473,7 @@ PdoReadWrite(
         return FALSE;
     }
 
-    QueueInsertTail(&Pdo->FreshSrbs, Srb);
+    QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
     FrontendEvtchnTrigger(Pdo->Frontend);
 
     return FALSE;
@@ -1489,7 +1485,8 @@ PdoSyncCache(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    NTSTATUS    Status;
+    NTSTATUS        Status;
+    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
 
     if (FrontendGetCaps(Pdo->Frontend)->Connected == FALSE) {
         Trace("Target[%d] : Not Ready, fail SRB\n", PdoGetTargetId(Pdo));
@@ -1510,7 +1507,7 @@ PdoSyncCache(
         return FALSE;
     }
 
-    QueueInsertTail(&Pdo->FreshSrbs, Srb);
+    QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
     FrontendEvtchnTrigger(Pdo->Frontend);
 
     return FALSE;
@@ -1753,26 +1750,6 @@ PdoReadCapacity16(
 
 //=============================================================================
 // StorPort Methods
-static VOID
-__AbortSrbQueue(
-    __in PSRB_QUEUE              Queue,
-    __in PXENVBD_PDO             Pdo,
-    __in BOOLEAN                 Free,
-    __in PCHAR                   Name
-    )
-{
-    PSCSI_REQUEST_BLOCK Srb;
-
-    while ((Srb = QueuePop(Queue)) != NULL) {
-        ++Pdo->Aborted;
-        Trace("Target[%d] : Aborting SRB %p from %s\n", PdoGetTargetId(Pdo), Srb, Name);
-        if (Free)
-            __CleanupSrb(Pdo, Srb);
-
-        Srb->ScsiStatus = 0x40; // SCSI_ABORTED;
-        FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
-    }
-}
 __checkReturn
 static FORCEINLINE BOOLEAN
 __PdoExecuteScsi(
@@ -1845,7 +1822,8 @@ __PdoQueueShutdown(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    QueueInsertTail(&Pdo->ShutdownSrbs, Srb);
+    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    QueueAppend(&Pdo->ShutdownSrbs, &SrbExt->Entry);
     FrontendEvtchnTrigger(Pdo->Frontend);
 }
 
@@ -1854,42 +1832,43 @@ PdoReset(
     __in PXENVBD_PDO             Pdo
     )
 {
-    PSCSI_REQUEST_BLOCK     Srb;
-    ULONG                   Count = 0;
-
+    ULONG   Count;
     Trace("Target[%d] ====> (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 
-    while ((Srb = QueuePop(&Pdo->FreshSrbs)) != NULL) {
-        Srb->ScsiStatus = 0x40; //SCSI_STATUS_ABORTED;
-        FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
-    }
+    // Handles FreshSrbs and PreparedReqs
+    PdoAbortAllSrbs(Pdo);
 
-    while (QueuePeek(&Pdo->PreparedSrbs) || 
-           QueuePeek(&Pdo->SubmittedSrbs)) {
-
-        /* For prepared and submitted SRBs we just wait until they
-            complete normally.  We need to keep calling the event
-            channel callback directly, since scsiport won't run the
-            callback itself until we finish this SRB (which is also
-            why we don't need to worry about races). */
+    // SubmittedReqs
+    for (Count = 0; QueueCount(&Pdo->SubmittedReqs) && Count < (1ul << 24); ++Count) {
         FrontendNotifyResponses(Pdo->Frontend);
         FrontendEvtchnSend(Pdo->Frontend);
+        StorPortStallExecution(100); // 100 micro-seconds
+    }
+    if (QueueCount(&Pdo->SubmittedReqs)) {
+        Warning("Target[%d] : Still have %u requests outstanding\n", PdoGetTargetId(Pdo),
+                                QueueCount(&Pdo->SubmittedReqs));
 
-        if (QueuePeek(&Pdo->PreparedSrbs) || 
-            QueuePeek(&Pdo->SubmittedSrbs)) {
-            StorPortStallExecution(1000);
-            if (Count > 1000) {
-                Verbose("Target[%d] : Outstanding SRBs (%d Prepared, %d Submitted)\n", 
-                            PdoGetTargetId(Pdo), QueueCount(&Pdo->PreparedSrbs), QueueCount(&Pdo->SubmittedSrbs));
-                Count = 0;
-            } else {
-                Count++;
+        for (;;) {
+            PXENVBD_SRBEXT  SrbExt;
+            PXENVBD_REQUEST Request;
+            PLIST_ENTRY     Entry = QueuePop(&Pdo->SubmittedReqs);
+            if (Entry == NULL)
+                break;
+            Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+            SrbExt = GetSrbExt(Request->Srb);
+
+            Verbose("Target[%d] : SubmittedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
+        
+            SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
+            __CleanupRequest(Pdo, Request, FALSE);
+            __FreeRequest(Pdo, Request);
+
+            if (InterlockedDecrement(&SrbExt->Count) == 0) {
+                SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
+                FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
             }
         }
     }
-
-    FrontendNotifyResponses(Pdo->Frontend);
-    FrontendEvtchnSend(Pdo->Frontend);
 
     Trace("Target[%d] <==== (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 }
@@ -1972,11 +1951,41 @@ PdoAbortAllSrbs(
     __in PXENVBD_PDO             Pdo
     )
 {
-    const ULONG   Aborted = Pdo->Aborted;
-    __AbortSrbQueue(&Pdo->FreshSrbs, Pdo, FALSE, "Fresh");
-    __AbortSrbQueue(&Pdo->PreparedSrbs, Pdo, TRUE, "Prepared");
-    __AbortSrbQueue(&Pdo->SubmittedSrbs, Pdo, TRUE, "Submitted");
-    Verbose("Target[%d] : %d / %d Aborted SRBs\n", PdoGetTargetId(Pdo), Aborted, Pdo->Aborted);
+    // Abort Fresh SRBs
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->FreshSrbs);
+        if (Entry == NULL)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+
+        Verbose("Target[%d] : FreshSrb 0x%p -> SCSI_ABORTED\n", PdoGetTargetId(Pdo), SrbExt->Srb);
+        SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
+        SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED;
+        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
+    }
+
+    // Fail PreparedReqs
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->PreparedReqs);
+        if (Entry == NULL)
+            break;
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        SrbExt = GetSrbExt(Request->Srb);
+
+        Verbose("Target[%d] : PreparedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
+        
+        SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
+        __CleanupRequest(Pdo, Request, FALSE);
+        __FreeRequest(Pdo, Request);
+
+        if (InterlockedDecrement(&SrbExt->Count) == 0) {
+            SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
+            FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
+        }
+    }
 }
 
 VOID

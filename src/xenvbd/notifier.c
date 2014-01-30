@@ -115,8 +115,8 @@ NotifierDpc(
 
     if (PdoIsPaused(Pdo)) {
         Warning("Target[%d] : Paused, %d outstanding\n",
-                    PdoGetTargetId(Pdo), PdoOutstandingSrbs(Pdo));
-        if (PdoOutstandingSrbs(Pdo) == 0)
+                    PdoGetTargetId(Pdo), PdoOutstandingReqs(Pdo));
+        if (PdoOutstandingReqs(Pdo) == 0)
             return;
     }
 
