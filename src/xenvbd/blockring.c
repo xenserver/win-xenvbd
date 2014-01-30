@@ -199,10 +199,11 @@ BlockRingConnect(
     IN  PXENVBD_BLOCKRING           BlockRing
     )
 {
-    NTSTATUS    status;
-    PCHAR       Value;
-    ULONG       Index, RingPages;
-    PXENVBD_FDO Fdo = PdoGetFdo(FrontendGetPdo(BlockRing->Frontend));
+    NTSTATUS        status;
+    PCHAR           Value;
+    ULONG           Index, RingPages;
+    PXENVBD_FDO     Fdo = PdoGetFdo(FrontendGetPdo(BlockRing->Frontend));
+    PXENVBD_GRANTER Granter = FrontendGetGranter(BlockRing->Frontend);
 
     ASSERT(BlockRing->Connected == FALSE);
 
@@ -229,10 +230,8 @@ BlockRingConnect(
 
     RingPages = (1 << BlockRing->Order);
     for (Index = 0; Index < RingPages; ++Index) {
-        status = FrontendGnttabGet(BlockRing->Frontend, 
-                                    __Pfn((PUCHAR)BlockRing->SharedRing + (Index * PAGE_SIZE)), 
-                                    FALSE, 
-                                    &BlockRing->Grants[Index]);
+        status = GranterGet(Granter, __Pfn((PUCHAR)BlockRing->SharedRing + (Index * PAGE_SIZE)), 
+                                FALSE, &BlockRing->Grants[Index]);
         if (!NT_SUCCESS(status))
             goto fail2;
     }
@@ -243,7 +242,7 @@ BlockRingConnect(
 fail2:
     for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
         if (BlockRing->Grants[Index])
-            FrontendGnttabPut(BlockRing->Frontend, BlockRing->Grants[Index]);
+            GranterPut(Granter, BlockRing->Grants[Index]);
         BlockRing->Grants[Index] = 0;
     }
 
@@ -343,13 +342,14 @@ BlockRingDisconnect(
     IN  PXENVBD_BLOCKRING           BlockRing
     )
 {
-    ULONG   Index;
+    ULONG           Index;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(BlockRing->Frontend);
 
     ASSERT(BlockRing->Connected == TRUE);
 
     for (Index = 0; Index < XENVBD_MAX_RING_PAGES; ++Index) {
         if (BlockRing->Grants[Index]) {
-            FrontendGnttabPut(BlockRing->Frontend, BlockRing->Grants[Index]);
+            GranterPut(Granter, BlockRing->Grants[Index]);
         }
         BlockRing->Grants[Index] = 0;
     }
@@ -451,7 +451,7 @@ BlockRingPoll(
             --BlockRing->Outstanding;
 
             if (Request) {
-                PdoCompleteSubmittedRequest(Pdo, Request, Status);
+                PdoCompleteSubmitted(Pdo, Request, Status);
             }
 
             // zero request slot now its read

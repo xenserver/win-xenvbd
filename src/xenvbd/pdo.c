@@ -356,8 +356,9 @@ __PdoPauseDataPath(
     __in PXENVBD_PDO             Pdo
     )
 {
-    KIRQL         Irql;
-    LARGE_INTEGER Timeout;
+    KIRQL               Irql;
+    LARGE_INTEGER       Timeout;
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     KeAcquireSpinLock(&Pdo->Lock, &Irql);
     ++Pdo->Paused;
@@ -367,7 +368,7 @@ __PdoPauseDataPath(
 
     Timeout.QuadPart = -10000000;
     while (QueueCount(&Pdo->SubmittedReqs)) {
-        FrontendEvtchnSend(Pdo->Frontend); // let backend know it needs to do some work
+        NotifierSend(Notifier); // let backend know it needs to do some work
         KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
     }
 }
@@ -750,62 +751,74 @@ __FreeRequest(
     __in PXENVBD_REQUEST         Request
     )
 {
-    if (Request) {
-        LONG    Result;
+    LONG            Result;
+    ULONG           Index;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
 
-        ExFreeToNPagedLookasideList(&Pdo->RequestList, Request);
-        Result = InterlockedDecrement(&Pdo->RequestListUsed);
-        ASSERT3S(Result, >=, 0);
-        
-        if (Result == 0) {
-            KeSetEvent(&Pdo->RequestListEmpty, IO_NO_INCREMENT, FALSE);
+    // cleanup granted/mapped buffers
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:
+    case BLKIF_OP_WRITE:
+        for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
+            // ungrant (if granted)
+            if (Request->Segments[Index].GrantRef) {
+                GranterPut(Granter, Request->Segments[Index].GrantRef);
+                Request->Segments[Index].GrantRef = 0;
+            }
+
+            // release buffer (if got)
+            if (Request->Segments[Index].BufferId) {
+                BufferPut(Request->Segments[Index].BufferId);
+                Request->Segments[Index].BufferId = NULL;
+            }
+
+            // unmap buffer (if mapped)
+            if (Request->Segments[Index].Buffer) {
+                __PdoDecMappedPages(Pdo, Request->Segments[Index].Pfn[0], Request->Segments[Index].Pfn[1]);
+
+                MmUnmapLockedPages(Request->Segments[Index].Buffer, &Request->Segments[Index].Mdl);
+                RtlZeroMemory(&Request->Segments[Index].Mdl, sizeof(Request->Segments[Index].Mdl));
+                RtlZeroMemory(Request->Segments[Index].Pfn, sizeof(Request->Segments[Index].Pfn));
+
+                Request->Segments[Index].Buffer = NULL;
+                Request->Segments[Index].Length = 0;
+            }
         }
+        break;
+
+    default:
+        // no special cleanup
+        break;
+    }
+
+    // Free the request to lookaside
+    ExFreeToNPagedLookasideList(&Pdo->RequestList, Request);
+    Result = InterlockedDecrement(&Pdo->RequestListUsed);
+    ASSERT3S(Result, >=, 0);
+        
+    if (Result == 0) {
+        KeSetEvent(&Pdo->RequestListEmpty, IO_NO_INCREMENT, FALSE);
     }
 }
-static VOID
-__CleanupRequest(
-    __in PXENVBD_PDO             Pdo,
-    __in PXENVBD_REQUEST         Request,
-    __in BOOLEAN                 CopyOut
+static FORCEINLINE VOID
+__CopyOutRequest(
+    __in PXENVBD_REQUEST         Request
     )
 {
-    ULONG               Index;
+    ULONG       Index;
 
-    if (Request == NULL)
-        return;
+    ASSERT3U(Request->Operation, ==, BLKIF_OP_READ);
+    ASSERT3U(Request->NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
 
-    // ungrant request
-    for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
-        // ungrant (if granted)
-        if (Request->Segments[Index].GrantRef) {
-            FrontendGnttabPut(Pdo->Frontend, Request->Segments[Index].GrantRef);
-            Request->Segments[Index].GrantRef = 0;
-        }
-
-        // release buffer (if got)
+    for (Index = 0; Index < Request->NrSegments; ++Index) {
         if (Request->Segments[Index].BufferId) {
-            if (Request->Operation == BLKIF_OP_READ && CopyOut) {
-                ASSERT3P(Request->Segments[Index].Buffer, !=, NULL);
-                BufferCopyOut(Request->Segments[Index].BufferId, Request->Segments[Index].Buffer, Request->Segments[Index].Length);
-            }
-            BufferPut(Request->Segments[Index].BufferId);
-
-            Request->Segments[Index].BufferId = NULL;
-        }
-
-        // unmap buffer (if mapped)
-        if (Request->Segments[Index].Buffer) {
-            __PdoDecMappedPages(Pdo, Request->Segments[Index].Pfn[0], Request->Segments[Index].Pfn[1]);
-
-            MmUnmapLockedPages(Request->Segments[Index].Buffer, &Request->Segments[Index].Mdl);
-            RtlZeroMemory(&Request->Segments[Index].Mdl, sizeof(Request->Segments[Index].Mdl));
-            RtlZeroMemory(Request->Segments[Index].Pfn, sizeof(Request->Segments[Index].Pfn));
-
-            Request->Segments[Index].Buffer = NULL;
-            Request->Segments[Index].Length = 0;
+            BufferCopyOut(Request->Segments[Index].BufferId, 
+                            Request->Segments[Index].Buffer, 
+                            Request->Segments[Index].Length);
         }
     }
 }
+
 
 //=============================================================================
 // Preparing Requests
@@ -943,6 +956,7 @@ PrepareReadWrite(
     PSTOR_SCATTER_GATHER_LIST   SGList;
     XENVBD_SG_INDEX             SGIndex;
 
+    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
 
     const ULONG64   StartSector     = Cdb_LogicalBlock(Srb);
@@ -1085,7 +1099,7 @@ PrepareReadWrite(
             }
 
             // Grant and Fill in last details
-            Status = FrontendGnttabGet(Pdo->Frontend, Pfn, ReadOnly, &GrantRef);
+            Status = GranterGet(Granter, Pfn, ReadOnly, &GrantRef);
             if (!NT_SUCCESS(Status)) {
                 ++Pdo->GrantOpFails;
                 Warning("Target[%d] : GNTTAB(Get) failed (%08x)\n", PdoGetTargetId(Pdo), Status);
@@ -1123,7 +1137,6 @@ fail:
         if (Entry == &ReqList)
             break;
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-        __CleanupRequest(Pdo, Request, FALSE);
         __FreeRequest(Pdo, Request);
         InterlockedDecrement(&SrbExt->Count);
     }
@@ -1164,13 +1177,11 @@ PrepareSyncCache(
 
 //=============================================================================
 // Queue-Related
-ULONG
+VOID
 PdoPrepareFresh(
     __in PXENVBD_PDO             Pdo
     )
 {
-    ULONG   Count = 0;
-
     for (;;) {
         NTSTATUS        Status;
         PXENVBD_SRBEXT  SrbExt;
@@ -1195,23 +1206,20 @@ PdoPrepareFresh(
         }
 
         // if failed to prepare, put on fresh and finish up
-        if (NT_SUCCESS(Status)) {
-            ++Count;
-        } else {
+        if (!NT_SUCCESS(Status)) {
             QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
             break;
         }
     }
-
-    return Count;
 }
 
-ULONG
+VOID
 PdoSubmitPrepared(
     __in PXENVBD_PDO             Pdo
     )
 {
-    ULONG   Count = 0;
+    PXENVBD_BLOCKRING   BlockRing = FrontendGetBlockRing(Pdo->Frontend);
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     for (;;) {
         PXENVBD_REQUEST Request;
@@ -1220,19 +1228,111 @@ PdoSubmitPrepared(
             break;
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
 
-        if (!FrontendSubmitRequest(Pdo->Frontend, Request)) {
+        if (!BlockRingSubmit(BlockRing, Request)) {
             QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
             break;
         }
 
         QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
         Request->Srb->SrbStatus = SRB_STATUS_SUCCESS;
-        ++Count;
 
-        FrontendPushRequests(Pdo->Frontend);
+        if (BlockRingPush(BlockRing)) {
+            NotifierSend(Notifier);
+        }
+    }
+}
+
+static FORCEINLINE PCHAR
+__ErrorCode(
+    __in SHORT                   Status
+    )
+{
+    switch (Status) {
+    case BLKIF_RSP_OKAY:        return "OKAY";
+    case BLKIF_RSP_EOPNOTSUPP:  return "EOPNOTSUPP";
+    case BLKIF_RSP_ERROR:       return "ERROR";
+    default:                    return "UNKNOWN";
+    }
+}
+
+VOID
+PdoCompleteSubmitted(
+    __in PXENVBD_PDO             Pdo,
+    __in PXENVBD_REQUEST         Request,
+    __in SHORT                   Status
+    )
+{
+    PSCSI_REQUEST_BLOCK Srb = Request->Srb;
+    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
+    ASSERT3P(SrbExt, !=, NULL);
+
+    if (Status != BLKIF_RSP_OKAY) {
+        Srb->SrbStatus = SRB_STATUS_ERROR;
+        Warning("Target[%d] : %s %s\n", PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation), __ErrorCode(Status));
     }
 
-    return Count;
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:
+        __CopyOutRequest(Request);
+        break;
+    case BLKIF_OP_WRITE:
+        break;
+    case BLKIF_OP_WRITE_BARRIER:
+        if (Status == BLKIF_RSP_EOPNOTSUPP) {
+            // remove supported feature
+            FrontendGetFeatures(Pdo->Frontend)->Barrier = FALSE;
+            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+        }
+        break;
+    case BLKIF_OP_DISCARD:
+        if (Status == BLKIF_RSP_EOPNOTSUPP) {
+            // remove supported feature
+            FrontendGetFeatures(Pdo->Frontend)->Discard = FALSE;
+            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+        }
+        break;
+    default:
+        ASSERT(FALSE);
+        break;
+    }
+
+    QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
+    __FreeRequest(Pdo, Request);
+
+    // complete srb
+    if (InterlockedDecrement(&SrbExt->Count) == 0) {
+        if (Srb->SrbStatus == SRB_STATUS_SUCCESS) {
+            Srb->ScsiStatus = 0x00; // SCSI_GOOD
+        } else {
+            Srb->ScsiStatus = 0x40; // SCSI_ABORTED
+        }
+
+        FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
+    }
+}
+
+VOID
+PdoCompleteShutdown(
+    __in PXENVBD_PDO             Pdo
+    )
+{
+    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
+        return;
+
+    if (QueueCount(&Pdo->FreshSrbs) ||
+        QueueCount(&Pdo->PreparedReqs) ||
+        QueueCount(&Pdo->SubmittedReqs))
+        return;
+
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
+        if (Entry == NULL)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
+        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
+    }
 }
 
 VOID
@@ -1254,7 +1354,6 @@ PdoPreResume(
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         SrbExt = GetSrbExt(Request->Srb);
 
-        __CleanupRequest(Pdo, Request, FALSE);
         __FreeRequest(Pdo, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
@@ -1272,7 +1371,6 @@ PdoPreResume(
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         SrbExt = GetSrbExt(Request->Srb);
 
-        __CleanupRequest(Pdo, Request, FALSE);
         __FreeRequest(Pdo, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
@@ -1310,98 +1408,6 @@ PdoPostResume(
     Pdo->Missing = FALSE;
     Pdo->Reason = NULL;
     KeReleaseSpinLock(&Pdo->Lock, Irql);
-}
-
-VOID
-PdoCompleteShutdown(
-    __in PXENVBD_PDO             Pdo
-    )
-{
-    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
-        return;
-
-    if (QueueCount(&Pdo->FreshSrbs) ||
-        QueueCount(&Pdo->PreparedReqs) ||
-        QueueCount(&Pdo->SubmittedReqs))
-        return;
-
-    for (;;) {
-        PXENVBD_SRBEXT  SrbExt;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
-        if (Entry == NULL)
-            break;
-        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
-        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
-        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
-    }
-}
-
-static FORCEINLINE PCHAR
-__ErrorCode(
-    __in SHORT                   Status
-    )
-{
-    switch (Status) {
-    case BLKIF_RSP_OKAY:        return "OKAY";
-    case BLKIF_RSP_EOPNOTSUPP:  return "EOPNOTSUPP";
-    case BLKIF_RSP_ERROR:       return "ERROR";
-    default:                    return "UNKNOWN";
-    }
-}
-VOID
-PdoCompleteSubmittedRequest(
-    __in PXENVBD_PDO             Pdo,
-    __in PXENVBD_REQUEST         Request,
-    __in SHORT                   Status
-    )
-{
-    PSCSI_REQUEST_BLOCK Srb = Request->Srb;
-    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
-    ASSERT3P(SrbExt, !=, NULL);
-
-    if (Status != BLKIF_RSP_OKAY) {
-        Srb->SrbStatus = SRB_STATUS_ERROR;
-        Warning("Target[%d] : %s %s\n", PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation), __ErrorCode(Status));
-    }
-
-    switch (Request->Operation) {
-    case BLKIF_OP_READ:
-    case BLKIF_OP_WRITE:
-        // cleanup buffers
-        __CleanupRequest(Pdo, Request, TRUE);
-        break;
-    case BLKIF_OP_WRITE_BARRIER:
-        if (Status == BLKIF_RSP_EOPNOTSUPP) {
-            // remove supported feature
-            FrontendGetFeatures(Pdo->Frontend)->Barrier = FALSE;
-            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-        }
-        break;
-    case BLKIF_OP_DISCARD:
-        if (Status == BLKIF_RSP_EOPNOTSUPP) {
-            // remove supported feature
-            FrontendGetFeatures(Pdo->Frontend)->Discard = FALSE;
-            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-        }
-        break;
-    default:
-        ASSERT(FALSE);
-        break;
-    }
-
-    QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
-    __FreeRequest(Pdo, Request);
-
-    // complete srb
-    if (InterlockedDecrement(&SrbExt->Count) == 0) {
-        if (Srb->SrbStatus == SRB_STATUS_SUCCESS) {
-            Srb->ScsiStatus = 0x00; // SCSI_GOOD
-        } else {
-            Srb->ScsiStatus = 0x40; // SCSI_ABORTED
-        }
-
-        FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
-    }
 }
 
 //=============================================================================
@@ -1453,6 +1459,7 @@ PdoReadWrite(
     NTSTATUS            Status;
     PXENVBD_DISKINFO    DiskInfo = FrontendGetDiskInfo(Pdo->Frontend);
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     if (FrontendGetCaps(Pdo->Frontend)->Connected == FALSE) {
         Trace("Target[%d] : Not Ready, fail SRB\n", PdoGetTargetId(Pdo));
@@ -1474,7 +1481,7 @@ PdoReadWrite(
     }
 
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
-    FrontendEvtchnTrigger(Pdo->Frontend);
+    NotifierTrigger(Notifier);
 
     return FALSE;
 }
@@ -1485,8 +1492,9 @@ PdoSyncCache(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    NTSTATUS        Status;
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    NTSTATUS            Status;
+    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     if (FrontendGetCaps(Pdo->Frontend)->Connected == FALSE) {
         Trace("Target[%d] : Not Ready, fail SRB\n", PdoGetTargetId(Pdo));
@@ -1508,7 +1516,7 @@ PdoSyncCache(
     }
 
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
-    FrontendEvtchnTrigger(Pdo->Frontend);
+    NotifierTrigger(Notifier);
 
     return FALSE;
 }
@@ -1822,9 +1830,11 @@ __PdoQueueShutdown(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
+
     QueueAppend(&Pdo->ShutdownSrbs, &SrbExt->Entry);
-    FrontendEvtchnTrigger(Pdo->Frontend);
+    NotifierTrigger(Notifier);
 }
 
 VOID
@@ -1832,7 +1842,9 @@ PdoReset(
     __in PXENVBD_PDO             Pdo
     )
 {
-    ULONG   Count;
+    ULONG               Count;
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
+
     Trace("Target[%d] ====> (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 
     // Handles FreshSrbs and PreparedReqs
@@ -1841,7 +1853,7 @@ PdoReset(
     // SubmittedReqs
     for (Count = 0; QueueCount(&Pdo->SubmittedReqs) && Count < (1ul << 24); ++Count) {
         FrontendNotifyResponses(Pdo->Frontend);
-        FrontendEvtchnSend(Pdo->Frontend);
+        NotifierSend(Notifier);
         StorPortStallExecution(100); // 100 micro-seconds
     }
     if (QueueCount(&Pdo->SubmittedReqs)) {
@@ -1860,7 +1872,6 @@ PdoReset(
             Verbose("Target[%d] : SubmittedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
         
             SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-            __CleanupRequest(Pdo, Request, FALSE);
             __FreeRequest(Pdo, Request);
 
             if (InterlockedDecrement(&SrbExt->Count) == 0) {
@@ -1978,7 +1989,6 @@ PdoAbortAllSrbs(
         Verbose("Target[%d] : PreparedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
         
         SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-        __CleanupRequest(Pdo, Request, FALSE);
         __FreeRequest(Pdo, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {

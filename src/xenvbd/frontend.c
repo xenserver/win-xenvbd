@@ -171,41 +171,28 @@ FrontendGetPdo(
 {
     return Frontend->Pdo;
 }
+PXENVBD_BLOCKRING
+FrontendGetBlockRing(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->BlockRing;
+}
+PXENVBD_NOTIFIER
+FrontendGetNotifier(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->Notifier;
+}
+PXENVBD_GRANTER
+FrontendGetGranter(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->Granter;
+}
 
-//=============================================================================
-// Interface indirection
-NTSTATUS
-FrontendGnttabGet(
-    __in  PXENVBD_FRONTEND      Frontend,
-    __in  PFN_NUMBER            Pfn,
-    __in  BOOLEAN               ReadOnly,
-    __out PULONG                GrantRef
-    )
-{
-    return GranterGet(Frontend->Granter, Pfn, ReadOnly, GrantRef);
-}
-VOID
-FrontendGnttabPut(
-    __in  PXENVBD_FRONTEND      Frontend,
-    __in  ULONG                 GrantRef
-    )
-{
-    GranterPut(Frontend->Granter, GrantRef);
-}
-VOID
-FrontendEvtchnTrigger(
-    __in  PXENVBD_FRONTEND      Frontend
-    )
-{
-    NotifierTrigger(Frontend->Notifier);
-}
-VOID
-FrontendEvtchnSend(
-    __in  PXENVBD_FRONTEND      Frontend
-    )
-{
-    NotifierSend(Frontend->Notifier);
-}
 NTSTATUS
 FrontendStoreWriteFrontend(
     __in  PXENVBD_FRONTEND      Frontend,
@@ -293,25 +280,6 @@ FrontendNotifyResponses(
     PdoPrepareFresh(Frontend->Pdo);
     PdoSubmitPrepared(Frontend->Pdo);
     PdoCompleteShutdown(Frontend->Pdo);
-}
-
-BOOLEAN
-FrontendSubmitRequest(
-    __in  PXENVBD_FRONTEND          Frontend,
-    __in  PXENVBD_REQUEST           Request
-    )
-{
-    return BlockRingSubmit(Frontend->BlockRing, Request);
-}
-
-VOID
-FrontendPushRequests(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    if (BlockRingPush(Frontend->BlockRing)) {
-        NotifierSend(Frontend->Notifier);
-    }
 }
 
 //=============================================================================
