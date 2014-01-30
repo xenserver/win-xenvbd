@@ -32,7 +32,6 @@
 #include "queue.h"
 #include "debug.h"
 #include "assert.h"
-#include <xencdb.h>
 
 VOID
 QueueInit(
