@@ -480,12 +480,11 @@ BlockRingSubmit(
     KIRQL               Irql;
     blkif_request_t*    req;
 
-    KeAcquireSpinLock(&BlockRing->Lock, &Irql);
-
     if (RING_FULL(&BlockRing->FrontRing)) {
-        KeReleaseSpinLock(&BlockRing->Lock, Irql);
         return FALSE;
     }
+
+    KeAcquireSpinLock(&BlockRing->Lock, &Irql);
 
     req = RING_GET_REQUEST(&BlockRing->FrontRing, BlockRing->FrontRing.req_prod_pvt);
     ++BlockRing->FrontRing.req_prod_pvt;
