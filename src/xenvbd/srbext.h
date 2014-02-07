@@ -51,15 +51,33 @@ typedef struct _XENVBD_SEGMENT {
 } XENVBD_SEGMENT, *PXENVBD_SEGMENT;
 
 // Request - extension of blkif_request_t
+typedef struct _XENVBD_REQUEST_READWRITE {
+    UCHAR               NrSegments;
+    ULONG64             FirstSector;
+    XENVBD_SEGMENT      Segments[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+} XENVBD_REQUEST_READWRITE, *PXENVBD_REQUEST_READWRITE;
+
+typedef struct _XENVBD_REQUEST_BARRIER {
+    ULONG64             FirstSector;
+} XENVBD_REQUEST_BARRIER, *PXENVBD_REQUEST_BARRIER;
+
+typedef struct _XENVBD_REQUEST_DISCARD {
+    UCHAR               Flags;  // {0, BLKIF_DISCARD_SECURE}
+    ULONG64             FirstSector;
+    ULONG64             NrSectors;
+} XENVBD_REQUEST_DISCARD, *PXENVBD_REQUEST_DISCARD;
+
 typedef struct _XENVBD_REQUEST {
     PSCSI_REQUEST_BLOCK Srb;
     LIST_ENTRY          Entry;
 
     UCHAR               Operation;
-    UCHAR               NrSegments;
-    ULONG64             FirstSector;
-    ULONG64             NrSectors;
-    XENVBD_SEGMENT      Segments[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    union _XENVBD_REQUEST_TYPE {
+        XENVBD_REQUEST_READWRITE    ReadWrite;  // BLKIF_OP_{READ/WRITE}
+        XENVBD_REQUEST_BARRIER      Barrier;    // BLKIF_OP_WRITE_BARRIER
+        // nothing                              // BLKIF_OP_FLUSH_DISKCACHE
+        XENVBD_REQUEST_DISCARD      Discard;    // BLKIF_OP_DISCARD
+    } u;
 } XENVBD_REQUEST, *PXENVBD_REQUEST;
 
 // SRBExtension - context for SRBs

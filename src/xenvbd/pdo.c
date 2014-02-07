@@ -752,6 +752,18 @@ __AllocRequest(
     return Request;
 }
 static FORCEINLINE VOID
+UnmapSegmentBuffer(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_SEGMENT         Segment
+    )
+{
+    __PdoDecMappedPages(Pdo, Segment->Pfn[0], Segment->Pfn[1]);
+
+    MmUnmapLockedPages(Segment->Buffer, &Segment->Mdl);
+    RtlZeroMemory(&Segment->Mdl, sizeof(Segment->Mdl));
+    RtlZeroMemory(Segment->Pfn, sizeof(Segment->Pfn));
+}
+static FORCEINLINE VOID
 __FreeRequest(
     __in PXENVBD_PDO             Pdo,
     __in PXENVBD_REQUEST         Request
@@ -766,29 +778,23 @@ __FreeRequest(
     case BLKIF_OP_READ:
     case BLKIF_OP_WRITE:
         for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
+            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+
             // ungrant (if granted)
-            if (Request->Segments[Index].GrantRef) {
-                GranterPut(Granter, Request->Segments[Index].GrantRef);
-                Request->Segments[Index].GrantRef = 0;
-            }
-
+            if (Segment->GrantRef)
+                GranterPut(Granter, Segment->GrantRef);
+            Segment->GrantRef = 0;
+            
             // release buffer (if got)
-            if (Request->Segments[Index].BufferId) {
-                BufferPut(Request->Segments[Index].BufferId);
-                Request->Segments[Index].BufferId = NULL;
-            }
-
+            if (Segment->BufferId)
+                BufferPut(Segment->BufferId);
+            Segment->BufferId = NULL;
+            
             // unmap buffer (if mapped)
-            if (Request->Segments[Index].Buffer) {
-                __PdoDecMappedPages(Pdo, Request->Segments[Index].Pfn[0], Request->Segments[Index].Pfn[1]);
-
-                MmUnmapLockedPages(Request->Segments[Index].Buffer, &Request->Segments[Index].Mdl);
-                RtlZeroMemory(&Request->Segments[Index].Mdl, sizeof(Request->Segments[Index].Mdl));
-                RtlZeroMemory(Request->Segments[Index].Pfn, sizeof(Request->Segments[Index].Pfn));
-
-                Request->Segments[Index].Buffer = NULL;
-                Request->Segments[Index].Length = 0;
-            }
+            if (Segment->Buffer)
+                UnmapSegmentBuffer(Pdo, Segment);
+            Segment->Buffer = NULL;
+            Segment->Length = 0;
         }
         break;
 
@@ -813,15 +819,21 @@ __CopyOutRequest(
 {
     ULONG       Index;
 
-    ASSERT3U(Request->Operation, ==, BLKIF_OP_READ);
-    ASSERT3U(Request->NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:
+        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
 
-    for (Index = 0; Index < Request->NrSegments; ++Index) {
-        if (Request->Segments[Index].BufferId) {
-            BufferCopyOut(Request->Segments[Index].BufferId, 
-                            Request->Segments[Index].Buffer, 
-                            Request->Segments[Index].Length);
+        for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
+            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+
+            if (Segment->BufferId)
+                BufferCopyOut(Segment->BufferId, Segment->Buffer, Segment->Length);
         }
+        break;
+
+    default:
+        // not a READ, dont copy any data
+        break;
     }
 }
 
@@ -1047,16 +1059,15 @@ PrepareReadWrite(
 
         Request->Srb        = Srb;
         Request->Operation  = Operation;
-        Request->NrSegments = 0;
-        Request->FirstSector = StartSector + SectorsDone;
-        Request->NrSectors  = 0; // not used for Read/Write
 
+        Request->u.ReadWrite.NrSegments = 0;
+        Request->u.ReadWrite.FirstSector = StartSector + SectorsDone;
         for (Index = 0; Index < BLKIF_MAX_SEGMENTS_PER_REQUEST && SectorsDone != NumSectors; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->Segments[Index];
+            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
             PFN_NUMBER      Pfn;
             ULONG           SectorsNow;
 
-            Request->NrSegments++;
+            Request->u.ReadWrite.NrSegments++;
             
             if (SGListNext(&SGList, SectorSize - 1)) {
                 ++Pdo->GrantedSegments;
@@ -1115,8 +1126,9 @@ PrepareReadWrite(
             
             SectorsDone += SectorsNow;
         }
-        ASSERT3U(Request->NrSegments, >, 0);
-        ASSERT3U(Request->NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+        ASSERT3U(Request->u.ReadWrite.NrSegments, >, 0);
+        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+
     } while (SectorsDone < NumSectors);
 
     // completed preparing SRB, move requests to pending queue
@@ -1142,6 +1154,7 @@ fail:
     ASSERT3S(SrbExt->Count, ==, 0);
     return STATUS_UNSUCCESSFUL;
 }
+
 __checkReturn
 static NTSTATUS
 PrepareSyncCache(
@@ -1158,11 +1171,9 @@ PrepareSyncCache(
     SrbExt->Count = 1;
 
     Request->Srb = Srb;
-
     Request->Operation      = BLKIF_OP_WRITE_BARRIER;
-    Request->NrSegments     = 0;
-    Request->FirstSector    = Cdb_LogicalBlock(Srb);
-    Request->NrSectors      = 0;
+
+    Request->u.Barrier.FirstSector = Cdb_LogicalBlock(Srb);
 
     __UpdateStats(Pdo, BLKIF_OP_WRITE_BARRIER);
     QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
@@ -1260,33 +1271,24 @@ PdoCompleteSubmitted(
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     ASSERT3P(SrbExt, !=, NULL);
 
-    if (Status != BLKIF_RSP_OKAY) {
-        Srb->SrbStatus = SRB_STATUS_ERROR;
-        Warning("Target[%d] : %s %s\n", PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation), __ErrorCode(Status));
-    }
-
-    switch (Request->Operation) {
-    case BLKIF_OP_READ:
+    switch (Status) {
+    case BLKIF_RSP_OKAY:
         __CopyOutRequest(Request);
         break;
-    case BLKIF_OP_WRITE:
+
+    case BLKIF_RSP_EOPNOTSUPP:
+        // Remove appropriate feature support
+        FrontendRemoveFeature(Pdo->Frontend, Request->Operation);
+        Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+        Warning("Target[%d] : %s BLKIF_RSP_EOPNOTSUPP\n", 
+                PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation));
         break;
-    case BLKIF_OP_WRITE_BARRIER:
-        if (Status == BLKIF_RSP_EOPNOTSUPP) {
-            // remove supported feature
-            FrontendGetFeatures(Pdo->Frontend)->Barrier = FALSE;
-            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-        }
-        break;
-    case BLKIF_OP_DISCARD:
-        if (Status == BLKIF_RSP_EOPNOTSUPP) {
-            // remove supported feature
-            FrontendGetFeatures(Pdo->Frontend)->Discard = FALSE;
-            Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-        }
-        break;
+
+    case BLKIF_RSP_ERROR:
     default:
-        ASSERT(FALSE);
+        Warning("Target[%d] : %s BLKIF_RSP_ERROR\n", 
+                PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation));
+        Srb->SrbStatus = SRB_STATUS_ERROR;
         break;
     }
 

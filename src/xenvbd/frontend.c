@@ -129,6 +129,26 @@ __FrontendFree(
 
 //=============================================================================
 // Accessors
+VOID
+FrontendRemoveFeature(
+    IN  PXENVBD_FRONTEND        Frontend,
+    IN  UCHAR                   BlkifOperation
+    )
+{
+    switch (BlkifOperation) {
+    case BLKIF_OP_FLUSH_DISKCACHE:
+        Frontend->Features.FlushCache = FALSE;
+        break;
+    case BLKIF_OP_WRITE_BARRIER:    
+        Frontend->Features.Barrier = FALSE; 
+        break;
+    case BLKIF_OP_DISCARD:
+        Frontend->Features.Discard = FALSE;
+        break;
+    default:
+        break;
+    }
+}
 PXENVBD_CAPS
 FrontendGetCaps(
     __in  PXENVBD_FRONTEND      Frontend

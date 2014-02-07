@@ -68,6 +68,11 @@ typedef struct _XENVBD_DISKINFO {
 typedef struct _XENVBD_FRONTEND XENVBD_FRONTEND, *PXENVBD_FRONTEND;
 
 // Accessors
+extern VOID
+FrontendRemoveFeature(
+    IN  PXENVBD_FRONTEND        Frontend,
+    IN  UCHAR                   BlkifOperation
+    );
 extern PXENVBD_CAPS
 FrontendGetCaps(
     __in  PXENVBD_FRONTEND      Frontend

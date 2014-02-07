@@ -122,23 +122,24 @@ __BlockRingInsert(
     case BLKIF_OP_DISCARD:
         req_discard = (blkif_request_discard_t*)req;
         req_discard->operation       = BLKIF_OP_DISCARD;
+        req_discard->flag            = Request->u.Discard.Flags;
         req_discard->handle          = (USHORT)BlockRing->DeviceId;
         req_discard->id              = (ULONG64)Request;
-        req_discard->sector_number   = Request->FirstSector;
-        req_discard->nr_sectors      = Request->NrSectors;
+        req_discard->sector_number   = Request->u.Discard.FirstSector;
+        req_discard->nr_sectors      = Request->u.Discard.NrSectors;
         break;
 
     case BLKIF_OP_READ:
     case BLKIF_OP_WRITE:
         req->operation          = Request->Operation;
-        req->nr_segments        = Request->NrSegments;
+        req->nr_segments        = Request->u.ReadWrite.NrSegments;
         req->handle             = (USHORT)BlockRing->DeviceId;
         req->id                 = (ULONG64)Request;
-        req->sector_number      = Request->FirstSector;
-        for (Index = 0; Index < Request->NrSegments; ++Index) {
-            req->seg[Index].gref       = Request->Segments[Index].GrantRef;
-            req->seg[Index].first_sect = Request->Segments[Index].FirstSector;
-            req->seg[Index].last_sect  = Request->Segments[Index].LastSector;
+        req->sector_number      = Request->u.ReadWrite.FirstSector;
+        for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
+            req->seg[Index].gref       = Request->u.ReadWrite.Segments[Index].GrantRef;
+            req->seg[Index].first_sect = Request->u.ReadWrite.Segments[Index].FirstSector;
+            req->seg[Index].last_sect  = Request->u.ReadWrite.Segments[Index].LastSector;
         }
         break;
 
@@ -147,7 +148,7 @@ __BlockRingInsert(
         req->nr_segments        = 0;
         req->handle             = (USHORT)BlockRing->DeviceId;
         req->id                 = (ULONG64)Request;
-        req->sector_number      = Request->FirstSector;
+        req->sector_number      = Request->u.Barrier.FirstSector;
         break;
 
     default:
