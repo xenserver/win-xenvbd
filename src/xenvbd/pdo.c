@@ -101,6 +101,7 @@ struct _XENVBD_PDO {
     ULONG                       BlkOpRead;
     ULONG                       BlkOpWrite;
     ULONG                       BlkOpBarrier;
+    ULONG                       BlkOpDiscard;
     // Stats - Failures
     ULONG                       FailedAllocs;
     ULONG                       FailedMaps;
@@ -203,9 +204,9 @@ PdoDebugCallback(
           Pdo->Missing ? Pdo->Reason : "Not Missing");
 
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: BLKIF_OP_: READ=%u WRITE=%u BARRIER=%u\n",
+          "PDO: BLKIF_OP_: READ=%u WRITE=%u BARRIER=%u DISCARD=%u\n",
           Pdo->BlkOpRead, Pdo->BlkOpWrite,
-          Pdo->BlkOpBarrier);
+          Pdo->BlkOpBarrier, Pdo->BlkOpDiscard);
     DEBUG(Printf, DebugInterface, DebugCallback,
           "PDO: Failed: Allocs=%u Maps=%u Bounces=%u Grants=%u\n",
           Pdo->FailedAllocs, Pdo->FailedMaps,
@@ -214,7 +215,7 @@ PdoDebugCallback(
           "PDO: Segments Granted=%llu Bounced=%llu\n",
           Pdo->SegsGranted, Pdo->SegsBounced);
 
-    Pdo->BlkOpRead = Pdo->BlkOpWrite = Pdo->BlkOpBarrier = 0;
+    Pdo->BlkOpRead = Pdo->BlkOpWrite = Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
     Pdo->FailedAllocs = Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
     Pdo->SegsGranted = Pdo->SegsBounced = 0;
 
@@ -1127,6 +1128,32 @@ PrepareSyncCache(
     return STATUS_SUCCESS;
 }
 
+__checkReturn
+static NTSTATUS
+PrepareUnmap(
+    __in PXENVBD_PDO             Pdo,
+    __in PSCSI_REQUEST_BLOCK     Srb
+    )
+{
+    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    PXENVBD_REQUEST Request = RequestGet(Pdo);
+    if (Request == NULL)
+        return STATUS_UNSUCCESSFUL;
+
+    SrbExt->Count = 1;
+
+    Request->Srb = Srb;
+    Request->Operation      = BLKIF_OP_DISCARD;
+
+    Request->u.Discard.FirstSector = Cdb_LogicalBlock(Srb);
+    Request->u.Discard.NrSectors   = Cdb_TransferBlock(Srb);
+    Request->u.Discard.Flags       = 0;
+
+    Pdo->BlkOpDiscard++;
+    QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
+    return STATUS_SUCCESS;
+}
+
 //=============================================================================
 // Queue-Related
 VOID
@@ -1150,6 +1177,9 @@ PdoPrepareFresh(
             break;
         case SCSIOP_SYNCHRONIZE_CACHE:
             Status = PrepareSyncCache(Pdo, SrbExt->Srb);
+            break;
+        case SCSIOP_UNMAP:
+            Status = PrepareUnmap(Pdo, SrbExt->Srb);
             break;
         default:
             ASSERT(FALSE);
@@ -1454,6 +1484,42 @@ PdoSyncCache(
     return FALSE;
 }
 
+__checkReturn
+static DECLSPEC_NOINLINE BOOLEAN
+PdoUnmap(
+    __in PXENVBD_PDO             Pdo,
+    __in PSCSI_REQUEST_BLOCK     Srb
+    )
+{
+    NTSTATUS            Status;
+    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
+    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
+
+    if (FrontendGetCaps(Pdo->Frontend)->Connected == FALSE) {
+        Trace("Target[%d] : Not Ready, fail SRB\n", PdoGetTargetId(Pdo));
+        Srb->ScsiStatus = 0x40; // SCSI_ABORT;
+        return TRUE;
+    }
+
+    if (FrontendGetFeatures(Pdo->Frontend)->Discard == FALSE) {
+        Trace("Target[%d] : DISCARD not supported, suppressing\n", PdoGetTargetId(Pdo));
+        Srb->ScsiStatus = 0x00; // SCSI_GOOD
+        Srb->SrbStatus = SRB_STATUS_SUCCESS;
+        return TRUE;
+    }
+
+    Status = PrepareUnmap(Pdo, Srb);
+    if (NT_SUCCESS(Status)) {
+        PdoSubmitPrepared(Pdo);
+        return FALSE;
+    }
+
+    QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
+    NotifierTrigger(Notifier);
+
+    return FALSE;
+}
+
 #define MODE_CACHING_PAGE_LENGTH 20
 static DECLSPEC_NOINLINE VOID
 PdoModeSense(
@@ -1721,6 +1787,10 @@ __PdoExecuteScsi(
         
     case SCSIOP_SYNCHRONIZE_CACHE:
         return PdoSyncCache(Pdo, Srb);
+        break;
+
+    case SCSIOP_UNMAP:
+        return PdoUnmap(Pdo, Srb);
         break;
 
     case SCSIOP_INQUIRY:
