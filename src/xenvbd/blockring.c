@@ -119,16 +119,6 @@ __BlockRingInsert(
     blkif_request_discard_t*    req_discard;
 
     switch (Request->Operation) {
-    case BLKIF_OP_DISCARD:
-        req_discard = (blkif_request_discard_t*)req;
-        req_discard->operation       = BLKIF_OP_DISCARD;
-        req_discard->flag            = Request->u.Discard.Flags;
-        req_discard->handle          = (USHORT)BlockRing->DeviceId;
-        req_discard->id              = (ULONG64)Request;
-        req_discard->sector_number   = Request->u.Discard.FirstSector;
-        req_discard->nr_sectors      = Request->u.Discard.NrSectors;
-        break;
-
     case BLKIF_OP_READ:
     case BLKIF_OP_WRITE:
         req->operation          = Request->Operation;
@@ -149,6 +139,16 @@ __BlockRingInsert(
         req->handle             = (USHORT)BlockRing->DeviceId;
         req->id                 = (ULONG64)Request;
         req->sector_number      = Request->u.Barrier.FirstSector;
+        break;
+
+    case BLKIF_OP_DISCARD:
+        req_discard = (blkif_request_discard_t*)req;
+        req_discard->operation       = BLKIF_OP_DISCARD;
+        req_discard->flag            = Request->u.Discard.Flags;
+        req_discard->handle          = (USHORT)BlockRing->DeviceId;
+        req_discard->id              = (ULONG64)Request;
+        req_discard->sector_number   = Request->u.Discard.FirstSector;
+        req_discard->nr_sectors      = Request->u.Discard.NrSectors;
         break;
 
     default:

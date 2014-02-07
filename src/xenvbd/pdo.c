@@ -97,17 +97,18 @@ struct _XENVBD_PDO {
     XENVBD_QUEUE                SubmittedReqs;
     XENVBD_QUEUE                ShutdownSrbs;
 
-    // Stats
-    ULONG                       OutstandingMappedPages;
-    ULONG                       GrantOpFails;
-    ULONG                       MapFails;
-    ULONG                       BounceFails;
-    ULONG                       Reads;
-    ULONG                       Writes;
-    ULONG                       Other;
-    ULONG                       Aborted;
-    ULONG64                     GrantedSegments;
-    ULONG64                     BouncedSegments;
+    // Stats - SRB Counts by BLKIF_OP_
+    ULONG                       BlkOpRead;
+    ULONG                       BlkOpWrite;
+    ULONG                       BlkOpBarrier;
+    // Stats - Failures
+    ULONG                       FailedAllocs;
+    ULONG                       FailedMaps;
+    ULONG                       FailedBounces;
+    ULONG                       FailedGrants;
+    // Stats - Segments
+    ULONG64                     SegsGranted;
+    ULONG64                     SegsBounced;
 };
 
 //=============================================================================
@@ -160,6 +161,7 @@ __PnpStateName(
     default:                    return "UNKNOWN";
     }
 }
+
 DECLSPEC_NOINLINE VOID
 PdoDebugCallback(
     __in PXENVBD_PDO Pdo,
@@ -199,52 +201,30 @@ PdoDebugCallback(
     DEBUG(Printf, DebugInterface, DebugCallback,
           "PDO: Missing                : %s\n",
           Pdo->Missing ? Pdo->Reason : "Not Missing");
+
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: OutstandingMappedPages : %d\n",
-          Pdo->OutstandingMappedPages);
+          "PDO: BLKIF_OP_: READ=%u WRITE=%u BARRIER=%u\n",
+          Pdo->BlkOpRead, Pdo->BlkOpWrite,
+          Pdo->BlkOpBarrier);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: GrantOpFails           : %d\n",
-          Pdo->GrantOpFails);
+          "PDO: Failed: Allocs=%u Maps=%u Bounces=%u Grants=%u\n",
+          Pdo->FailedAllocs, Pdo->FailedMaps,
+          Pdo->FailedBounces, Pdo->FailedGrants);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: MapFails               : %d\n",
-          Pdo->MapFails);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: BounceFails            : %d\n",
-          Pdo->BounceFails);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: ReadSRBs               : %d\n", 
-          Pdo->Reads);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: WriteSRBs              : %d\n", 
-          Pdo->Writes);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: SyncSRBs               : %d\n", 
-          Pdo->Other);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: AbortedSRBs            : %d\n",
-          Pdo->Aborted);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: BouncedSegments        : %lld\n", 
-          Pdo->BouncedSegments);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: GrantedSegments        : %lld\n", 
-          Pdo->GrantedSegments);
+          "PDO: Segments Granted=%llu Bounced=%llu\n",
+          Pdo->SegsGranted, Pdo->SegsBounced);
+
+    Pdo->BlkOpRead = Pdo->BlkOpWrite = Pdo->BlkOpBarrier = 0;
+    Pdo->FailedAllocs = Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
+    Pdo->SegsGranted = Pdo->SegsBounced = 0;
 
     FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->FreshSrbs, "Fresh", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->PreparedReqs, "Prepared", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown", DebugInterface, DebugCallback);
-
-    Pdo->OutstandingMappedPages = 0;
-    Pdo->GrantOpFails = 0;
-    Pdo->MapFails = 0;
-    Pdo->BounceFails = 0;
-    Pdo->Reads = 0;
-    Pdo->Writes = 0;
-    Pdo->Other = 0;
-    Pdo->BouncedSegments = Pdo->GrantedSegments = 0;
 }
+
 //=============================================================================
 // Power States
 __checkReturn
@@ -267,6 +247,7 @@ PdoSetDevicePowerState(
     
     return Changed;
 }
+
 //=============================================================================
 // PnP States
 FORCEINLINE VOID
@@ -289,6 +270,7 @@ PdoSetMissing(
     }
     KeReleaseSpinLock(&Pdo->Lock, Irql);
 }
+
 __checkReturn
 FORCEINLINE BOOLEAN
 PdoIsMissing(
@@ -304,6 +286,7 @@ PdoIsMissing(
 
     return Missing;
 }
+
 FORCEINLINE const CHAR*
 PdoMissingReason(
     __in PXENVBD_PDO            Pdo
@@ -318,6 +301,7 @@ PdoMissingReason(
 
     return Reason;
 }
+
 __checkReturn
 FORCEINLINE BOOLEAN
 PdoIsEmulatedUnplugged(
@@ -326,6 +310,7 @@ PdoIsEmulatedUnplugged(
 {
     return Pdo->EmulatedUnplugged;
 }
+
 FORCEINLINE VOID
 PdoSetDevicePnpState(
     __in PXENVBD_PDO             Pdo,
@@ -337,6 +322,7 @@ PdoSetDevicePnpState(
     Pdo->PrevPnpState = Pdo->DevicePnpState;
     Pdo->DevicePnpState = State;
 }
+
 __checkReturn
 FORCEINLINE DEVICE_PNP_STATE
 PdoGetDevicePnpState(
@@ -345,6 +331,7 @@ PdoGetDevicePnpState(
 {
     return Pdo->DevicePnpState;
 }
+
 static FORCEINLINE VOID
 __PdoRestoreDevicePnpState(
     __in PXENVBD_PDO             Pdo,
@@ -356,6 +343,7 @@ __PdoRestoreDevicePnpState(
         Pdo->DevicePnpState = Pdo->PrevPnpState;
     }
 }
+
 __drv_maxIRQL(APC_LEVEL)
 static FORCEINLINE VOID
 __PdoPauseDataPath(
@@ -378,6 +366,7 @@ __PdoPauseDataPath(
         KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
     }
 }
+
 static FORCEINLINE VOID
 __PdoUnpauseDataPath(
     __in PXENVBD_PDO             Pdo
@@ -470,6 +459,7 @@ fail1:
     Error("Fail1 (%08x)\n", Status);
     return Status;
 }
+
 VOID
 PdoDestroy(
     __in PXENVBD_PDO             Pdo
@@ -510,6 +500,7 @@ PdoDestroy(
     Verbose("Target[%d] : Destroyed\n", TargetId);
     Trace("Target[%d] @ (%d) <=====\n", TargetId, KeGetCurrentIrql());
 }
+
 __checkReturn
 NTSTATUS
 PdoD3ToD0(
@@ -552,6 +543,7 @@ fail1:
 
     return Status;
 }
+
 VOID
 PdoD0ToD3(
     __in PXENVBD_PDO             Pdo
@@ -707,157 +699,6 @@ PdoSectorSize(
 }
 
 //=============================================================================
-// REQUEST related
-static FORCEINLINE VOID
-__PdoIncMappedPages(
-    __in PXENVBD_PDO             Pdo,
-    __in PFN_NUMBER              Pfn0,
-    __in PFN_NUMBER              Pfn1
-    )
-{
-    if (Pfn0)
-        ++Pdo->OutstandingMappedPages;
-    if (Pfn1)
-        ++Pdo->OutstandingMappedPages;
-}
-static FORCEINLINE VOID
-__PdoDecMappedPages(
-    __in PXENVBD_PDO             Pdo,
-    __in PFN_NUMBER              Pfn0,
-    __in PFN_NUMBER              Pfn1
-    )
-{
-    if (Pfn0)
-        --Pdo->OutstandingMappedPages;
-    if (Pfn1)
-        --Pdo->OutstandingMappedPages;
-}
-__checkReturn
-static FORCEINLINE PXENVBD_REQUEST
-__AllocRequest(
-    __in PXENVBD_PDO             Pdo
-    )
-{
-    PVOID Request;
-    Request = ExAllocateFromNPagedLookasideList(&Pdo->RequestList);
-    if (Request) {
-        LONG    Result;
-        
-        Result = InterlockedIncrement(&Pdo->RequestListUsed);
-        ASSERT3S(Result, >, 0);
-
-        RtlZeroMemory(Request, sizeof(XENVBD_REQUEST));
-        KeClearEvent(&Pdo->RequestListEmpty);
-    }
-    return Request;
-}
-static FORCEINLINE VOID
-UnmapSegmentBuffer(
-    IN  PXENVBD_PDO             Pdo,
-    IN  PXENVBD_SEGMENT         Segment
-    )
-{
-    __PdoDecMappedPages(Pdo, Segment->Pfn[0], Segment->Pfn[1]);
-
-    MmUnmapLockedPages(Segment->Buffer, &Segment->Mdl);
-    RtlZeroMemory(&Segment->Mdl, sizeof(Segment->Mdl));
-    RtlZeroMemory(Segment->Pfn, sizeof(Segment->Pfn));
-}
-static FORCEINLINE VOID
-__FreeRequest(
-    __in PXENVBD_PDO             Pdo,
-    __in PXENVBD_REQUEST         Request
-    )
-{
-    LONG            Result;
-    ULONG           Index;
-    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
-
-    // cleanup granted/mapped buffers
-    switch (Request->Operation) {
-    case BLKIF_OP_READ:
-    case BLKIF_OP_WRITE:
-        for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-
-            // ungrant (if granted)
-            if (Segment->GrantRef)
-                GranterPut(Granter, Segment->GrantRef);
-            Segment->GrantRef = 0;
-            
-            // release buffer (if got)
-            if (Segment->BufferId)
-                BufferPut(Segment->BufferId);
-            Segment->BufferId = NULL;
-            
-            // unmap buffer (if mapped)
-            if (Segment->Buffer)
-                UnmapSegmentBuffer(Pdo, Segment);
-            Segment->Buffer = NULL;
-            Segment->Length = 0;
-        }
-        break;
-
-    default:
-        // no special cleanup
-        break;
-    }
-
-    // Free the request to lookaside
-    ExFreeToNPagedLookasideList(&Pdo->RequestList, Request);
-    Result = InterlockedDecrement(&Pdo->RequestListUsed);
-    ASSERT3S(Result, >=, 0);
-        
-    if (Result == 0) {
-        KeSetEvent(&Pdo->RequestListEmpty, IO_NO_INCREMENT, FALSE);
-    }
-}
-static FORCEINLINE VOID
-__CopyOutRequest(
-    __in PXENVBD_REQUEST         Request
-    )
-{
-    ULONG       Index;
-
-    switch (Request->Operation) {
-    case BLKIF_OP_READ:
-        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
-
-        for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-
-            if (Segment->BufferId)
-                BufferCopyOut(Segment->BufferId, Segment->Buffer, Segment->Length);
-        }
-        break;
-
-    default:
-        // not a READ, dont copy any data
-        break;
-    }
-}
-
-
-//=============================================================================
-// Preparing Requests
-static FORCEINLINE VOID
-__UpdateStats(
-    __in PXENVBD_PDO             Pdo,
-    __in UCHAR                   Operation
-    )
-{
-    switch (Operation) {
-    case BLKIF_OP_READ:
-        Pdo->Reads++;
-        break;
-    case BLKIF_OP_WRITE:
-        Pdo->Writes++;
-        break;
-    default:
-        Pdo->Other++;
-        break;
-    }
-}
 
 static FORCEINLINE ULONG
 __SectorsPerPage(
@@ -960,8 +801,8 @@ MapSegmentBuffer(
     IN  PXENVBD_PDO             Pdo,
     IN  PXENVBD_SEGMENT         Segment,
     IN  PXENVBD_SG_LIST         SGList,
-    IN  ULONG                   SectorSize, // for ASSERTs
-    IN  ULONG                   SectorsNow  // for ASSERTs
+    IN  ULONG                   SectorSize,
+    IN  ULONG                   SectorsNow
     )
 {
     PMDL    Mdl;
@@ -998,7 +839,6 @@ MapSegmentBuffer(
     if (!Segment->Buffer) {
         goto fail;
     }
-    __PdoIncMappedPages(Pdo, Segment->Pfn[0], Segment->Pfn[1]);
 
     ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Segment->Pfn[0]);
     ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Segment->Pfn[1]);
@@ -1007,6 +847,114 @@ MapSegmentBuffer(
 
 fail:
     return FALSE;
+}
+
+static FORCEINLINE VOID
+UnmapSegmentBuffer(
+    IN  PXENVBD_SEGMENT         Segment
+    )
+{
+    MmUnmapLockedPages(Segment->Buffer, &Segment->Mdl);
+    RtlZeroMemory(&Segment->Mdl, sizeof(Segment->Mdl));
+    RtlZeroMemory(Segment->Pfn, sizeof(Segment->Pfn));
+}
+
+static FORCEINLINE PXENVBD_REQUEST
+RequestGet(
+    IN  PXENVBD_PDO             Pdo
+    )
+{
+    PVOID   Request;
+    LONG    Result;
+
+    Request = ExAllocateFromNPagedLookasideList(&Pdo->RequestList);
+    if (Request == NULL)
+        goto fail;
+
+    Result = InterlockedIncrement(&Pdo->RequestListUsed);
+    ASSERT3S(Result, >, 0);
+    RtlZeroMemory(Request, sizeof(XENVBD_REQUEST));
+    KeClearEvent(&Pdo->RequestListEmpty);
+    return Request;
+
+fail:
+    ++Pdo->FailedAllocs;
+    return NULL;
+}
+
+static FORCEINLINE VOID
+RequestPut(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_REQUEST         Request
+    )
+{
+    LONG            Result;
+    ULONG           Index;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
+
+    // cleanup granted/mapped buffers
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:
+    case BLKIF_OP_WRITE:
+        for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
+            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+
+            // ungrant (if granted)
+            if (Segment->GrantRef)
+                GranterPut(Granter, Segment->GrantRef);
+            Segment->GrantRef = 0;
+            
+            // release buffer (if got)
+            if (Segment->BufferId)
+                BufferPut(Segment->BufferId);
+            Segment->BufferId = NULL;
+            
+            // unmap buffer (if mapped)
+            if (Segment->Buffer)
+                UnmapSegmentBuffer(Segment);
+            Segment->Buffer = NULL;
+            Segment->Length = 0;
+        }
+        break;
+
+    default:
+        // no special cleanup
+        break;
+    }
+
+    // Free the request to lookaside
+    ExFreeToNPagedLookasideList(&Pdo->RequestList, Request);
+    Result = InterlockedDecrement(&Pdo->RequestListUsed);
+    ASSERT3S(Result, >=, 0);
+        
+    if (Result == 0) {
+        KeSetEvent(&Pdo->RequestListEmpty, IO_NO_INCREMENT, FALSE);
+    }
+}
+
+static FORCEINLINE VOID
+RequestCopyOutput(
+    __in PXENVBD_REQUEST         Request
+    )
+{
+    ULONG       Index;
+
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:
+        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+
+        for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
+            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+
+            if (Segment->BufferId)
+                BufferCopyOut(Segment->BufferId, Segment->Buffer, Segment->Length);
+        }
+        break;
+
+    default:
+        // not a READ, dont copy any data
+        break;
+    }
 }
 
 __checkReturn
@@ -1049,11 +997,10 @@ PrepareReadWrite(
     SectorsDone = 0;
     SrbExt->Count = 0;
     do {
-        PXENVBD_REQUEST Request = __AllocRequest(Pdo);
-        if (Request == NULL) {
-            Trace("Target[%d] : AllocRequest failed\n", PdoGetTargetId(Pdo));
+        PXENVBD_REQUEST Request = RequestGet(Pdo);
+        if (Request == NULL) 
             goto fail;
-        }
+        
         InsertTailList(&ReqList, &Request->Entry);
         InterlockedIncrement(&SrbExt->Count);
 
@@ -1070,7 +1017,7 @@ PrepareReadWrite(
             Request->u.ReadWrite.NrSegments++;
             
             if (SGListNext(&SGList, SectorSize - 1)) {
-                ++Pdo->GrantedSegments;
+                ++Pdo->SegsGranted;
                 // get first sector, last sector and count
                 Segment->FirstSector    = (UCHAR)((__Offset(SGList.PhysAddr) + SectorSize - 1) / SectorSize);
                 SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage - Segment->FirstSector);
@@ -1083,7 +1030,7 @@ PrepareReadWrite(
                 ASSERT3U((SGList.PhysLen / SectorSize), ==, SectorsNow);
                 ASSERT3U((SGList.PhysLen & (SectorSize - 1)), ==, 0);
             } else {
-                ++Pdo->BouncedSegments;
+                ++Pdo->SegsBounced;
                 // get first sector, last sector and count
                 Segment->FirstSector    = 0;
                 SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage);
@@ -1098,15 +1045,13 @@ PrepareReadWrite(
 
                 // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
                 if (!MapSegmentBuffer(Pdo, Segment, &SGList, SectorSize, SectorsNow)) {
-                    ++Pdo->MapFails;
-                    Warning("Target[%d] : MmMapLockedPagesSpecifyCache failed\n", PdoGetTargetId(Pdo));
+                    ++Pdo->FailedMaps;
                     goto fail;
                 }
 
                 // get a buffer
                 if (!BufferGet(Srb, &Segment->BufferId, &Pfn)) {
-                    ++Pdo->BounceFails;
-                    Warning("Target[%d] : BufferGet failed\n", PdoGetTargetId(Pdo));
+                    ++Pdo->FailedBounces;
                     goto fail;
                 }
 
@@ -1119,8 +1064,7 @@ PrepareReadWrite(
             // Grant segment's page
             Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
             if (!NT_SUCCESS(Status)) {
-                ++Pdo->GrantOpFails;
-                Warning("Target[%d] : GNTTAB(Get) failed (%08x)\n", PdoGetTargetId(Pdo), Status);
+                ++Pdo->FailedGrants;
                 goto fail;
             }
             
@@ -1132,7 +1076,11 @@ PrepareReadWrite(
     } while (SectorsDone < NumSectors);
 
     // completed preparing SRB, move requests to pending queue
-    __UpdateStats(Pdo, Operation);
+    switch (Operation) {
+    case BLKIF_OP_READ:     Pdo->BlkOpRead++;       break;
+    case BLKIF_OP_WRITE:    Pdo->BlkOpWrite++;      break;
+    default:                ASSERT(FALSE);          break;
+    }
     for (;;) {
         PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
         if (Entry == &ReqList)
@@ -1148,7 +1096,7 @@ fail:
         if (Entry == &ReqList)
             break;
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-        __FreeRequest(Pdo, Request);
+        RequestPut(Pdo, Request);
         InterlockedDecrement(&SrbExt->Count);
     }
     ASSERT3S(SrbExt->Count, ==, 0);
@@ -1163,11 +1111,10 @@ PrepareSyncCache(
     )
 {
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-    PXENVBD_REQUEST Request = __AllocRequest(Pdo);
-    if (Request == NULL) {
-        Trace("Target[%d] : AllocRequests failed\n", PdoGetTargetId(Pdo));
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
+    PXENVBD_REQUEST Request = RequestGet(Pdo);
+    if (Request == NULL)
+        return STATUS_UNSUCCESSFUL;
+    
     SrbExt->Count = 1;
 
     Request->Srb = Srb;
@@ -1175,7 +1122,7 @@ PrepareSyncCache(
 
     Request->u.Barrier.FirstSector = Cdb_LogicalBlock(Srb);
 
-    __UpdateStats(Pdo, BLKIF_OP_WRITE_BARRIER);
+    Pdo->BlkOpBarrier++;
     QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
     return STATUS_SUCCESS;
 }
@@ -1247,19 +1194,6 @@ PdoSubmitPrepared(
     }
 }
 
-static FORCEINLINE PCHAR
-__ErrorCode(
-    __in SHORT                   Status
-    )
-{
-    switch (Status) {
-    case BLKIF_RSP_OKAY:        return "OKAY";
-    case BLKIF_RSP_EOPNOTSUPP:  return "EOPNOTSUPP";
-    case BLKIF_RSP_ERROR:       return "ERROR";
-    default:                    return "UNKNOWN";
-    }
-}
-
 VOID
 PdoCompleteSubmitted(
     __in PXENVBD_PDO             Pdo,
@@ -1273,7 +1207,7 @@ PdoCompleteSubmitted(
 
     switch (Status) {
     case BLKIF_RSP_OKAY:
-        __CopyOutRequest(Request);
+        RequestCopyOutput(Request);
         break;
 
     case BLKIF_RSP_EOPNOTSUPP:
@@ -1293,7 +1227,7 @@ PdoCompleteSubmitted(
     }
 
     QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
-    __FreeRequest(Pdo, Request);
+    RequestPut(Pdo, Request);
 
     // complete srb
     if (InterlockedDecrement(&SrbExt->Count) == 0) {
@@ -1350,7 +1284,7 @@ PdoPreResume(
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         SrbExt = GetSrbExt(Request->Srb);
 
-        __FreeRequest(Pdo, Request);
+        RequestPut(Pdo, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
             InsertTailList(&List, &SrbExt->Entry);
@@ -1367,7 +1301,7 @@ PdoPreResume(
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         SrbExt = GetSrbExt(Request->Srb);
 
-        __FreeRequest(Pdo, Request);
+        RequestPut(Pdo, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
             InsertTailList(&List, &SrbExt->Entry);
@@ -1419,6 +1353,7 @@ __ValidateSectors(
     // Deal with overflow
     return (Start < SectorCount) && ((Start + Length) <= SectorCount);
 }
+
 __checkReturn
 static FORCEINLINE BOOLEAN
 __ValidateSrbBuffer(
@@ -1445,6 +1380,7 @@ __ValidateSrbBuffer(
 
     return TRUE;
 }
+
 __checkReturn
 static DECLSPEC_NOINLINE BOOLEAN
 PdoReadWrite(
@@ -1481,6 +1417,7 @@ PdoReadWrite(
 
     return FALSE;
 }
+
 __checkReturn
 static DECLSPEC_NOINLINE BOOLEAN
 PdoSyncCache(
@@ -1625,6 +1562,7 @@ PdoModeSense(
     Srb->SrbStatus = SRB_STATUS_SUCCESS;
     Srb->DataTransferLength = __min(Cdb_AllocationLength(Srb), Header->ModeDataLength + 1);
 }
+
 static DECLSPEC_NOINLINE VOID
 PdoRequestSense(
     __in PXENVBD_PDO             Pdo,
@@ -1651,6 +1589,7 @@ PdoRequestSense(
     Srb->DataTransferLength     = sizeof(SENSE_DATA);
     Srb->SrbStatus              = SRB_STATUS_SUCCESS;
 }
+
 static DECLSPEC_NOINLINE VOID
 PdoReportLuns(
     __in PXENVBD_PDO             Pdo,
@@ -1693,6 +1632,7 @@ PdoReportLuns(
     Srb->DataTransferLength = __min(Length, AllocLength);
     Srb->SrbStatus = SRB_STATUS_SUCCESS;
 }
+
 static DECLSPEC_NOINLINE VOID
 PdoReadCapacity(
     __in PXENVBD_PDO             Pdo,
@@ -1725,6 +1665,7 @@ PdoReadCapacity(
 
     Srb->SrbStatus = SRB_STATUS_SUCCESS;
 }
+
 static DECLSPEC_NOINLINE VOID
 PdoReadCapacity16(
     __in PXENVBD_PDO             Pdo,
@@ -1820,6 +1761,7 @@ __PdoExecuteScsi(
     }
     return TRUE;
 }
+
 static FORCEINLINE VOID
 __PdoQueueShutdown(
     __in PXENVBD_PDO             Pdo,
@@ -1868,7 +1810,7 @@ PdoReset(
             Verbose("Target[%d] : SubmittedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
         
             SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-            __FreeRequest(Pdo, Request);
+            RequestPut(Pdo, Request);
 
             if (InterlockedDecrement(&SrbExt->Count) == 0) {
                 SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
@@ -1879,6 +1821,7 @@ PdoReset(
 
     Trace("Target[%d] <==== (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 }
+
 __checkReturn
 static FORCEINLINE BOOLEAN
 __ValidateSrbForPdo(
@@ -1925,6 +1868,7 @@ __ValidateSrbForPdo(
 
     return TRUE;
 }
+
 __checkReturn
 BOOLEAN
 PdoStartIo(
@@ -1985,7 +1929,7 @@ PdoAbortAllSrbs(
         Verbose("Target[%d] : PreparedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
         
         SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-        __FreeRequest(Pdo, Request);
+        RequestPut(Pdo, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
             SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
@@ -2020,6 +1964,7 @@ PdoSrbPnp(
         break;
     }
 }
+
 //=============================================================================
 // PnP Handler
 extern PDRIVER_DISPATCH StorPortDispatchPnp;
@@ -2063,6 +2008,7 @@ __PdoDeviceUsageNotification(
     }
     FrontendWriteUsage(Pdo->Frontend);
 }
+
 static FORCEINLINE VOID
 __PdoCheckEjectPending(
     __in PXENVBD_PDO             Pdo
@@ -2084,6 +2030,7 @@ __PdoCheckEjectPending(
         IoRequestDeviceEject(Pdo->DeviceObject);
     }
 }
+
 static FORCEINLINE VOID
 __PdoCheckEjectFailed(
     __in PXENVBD_PDO             Pdo
@@ -2104,6 +2051,7 @@ __PdoCheckEjectFailed(
         FrontendStoreWriteFrontend(Pdo->Frontend, "error", "Unplug failed due to open handle(s)!");
     }
 }
+
 static FORCEINLINE VOID
 __PdoRemoveDevice(
     __in PXENVBD_PDO             Pdo
@@ -2129,6 +2077,7 @@ __PdoRemoveDevice(
         break;
     }
 }
+
 static FORCEINLINE VOID
 __PdoEject(
     __in PXENVBD_PDO             Pdo
