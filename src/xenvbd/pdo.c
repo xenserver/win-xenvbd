@@ -1235,10 +1235,10 @@ PdoSubmitPrepared(
 
         QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
         Request->Srb->SrbStatus = SRB_STATUS_SUCCESS;
+    }
 
-        if (BlockRingPush(BlockRing)) {
-            NotifierSend(Notifier);
-        }
+    if (BlockRingPush(BlockRing)) {
+        NotifierSend(Notifier);
     }
 }
 

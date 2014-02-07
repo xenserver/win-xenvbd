@@ -51,27 +51,6 @@ QueueCount(
     return Queue->Current;
 }
 
-static FORCEINLINE BOOLEAN
-__ListContains(
-    IN  PLIST_ENTRY         Head,
-    IN  PLIST_ENTRY         List
-    )
-{
-    PLIST_ENTRY Entry;
-
-    for (Entry = Head->Flink;
-            Entry != Head;
-            Entry = Entry->Flink)
-    {
-        if (Entry == List)
-            return TRUE;
-    }
-
-    return FALSE;
-}
-
-#define ListContains(_h, _l)    __ListContains(_h, _l)
-
 __checkReturn
 PLIST_ENTRY
 QueuePop(
@@ -104,7 +83,6 @@ QueueUnPop(
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
     
-    ASSERT(!ListContains(&Queue->List, Entry));
     InsertHeadList(&Queue->List, Entry);
     if (++Queue->Current > Queue->Maximum)
         Queue->Maximum = Queue->Current;
@@ -122,7 +100,6 @@ QueueAppend(
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
     
-    ASSERT(!ListContains(&Queue->List, Entry));
     InsertTailList(&Queue->List, Entry);
     if (++Queue->Current > Queue->Maximum)
         Queue->Maximum = Queue->Current;
@@ -140,7 +117,6 @@ QueueRemove(
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
 
-    ASSERT(ListContains(&Queue->List, Entry));
     RemoveEntryList(Entry);
     --Queue->Current;
     
