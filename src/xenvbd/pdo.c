@@ -48,11 +48,17 @@
 #include <debug_interface.h>
 #include <suspend_interface.h>
 
-typedef struct _XENVBD_SG_INDEX {
-    ULONG       Index;  // SGList Index
-    ULONG       Offset; // Offset into SGElement
-    ULONG       LastLength; // Last length of SGElement
-} XENVBD_SG_INDEX, *PXENVBD_SG_INDEX;
+typedef struct _XENVBD_SG_LIST {
+    // SGList from SRB
+    PSTOR_SCATTER_GATHER_LIST   SGList;
+    // "current" values
+    STOR_PHYSICAL_ADDRESS       PhysAddr;
+    ULONG                       PhysLen;
+    // iteration
+    ULONG                       Index;
+    ULONG                       Offset;
+    ULONG                       Length;
+} XENVBD_SG_LIST, *PXENVBD_SG_LIST;
 
 #define PDO_SIGNATURE           'odpX'
 
@@ -840,6 +846,7 @@ __UpdateStats(
         break;
     }
 }
+
 static FORCEINLINE ULONG
 __SectorsPerPage(
     __in ULONG                   SectorSize
@@ -848,6 +855,7 @@ __SectorsPerPage(
     ASSERT3U(SectorSize, !=, 0);
     return PAGE_SIZE / SectorSize;
 }
+
 static FORCEINLINE VOID
 __Operation(
     __in UCHAR                   CdbOp,
@@ -868,6 +876,7 @@ __Operation(
         ASSERT(FALSE);
     }
 }
+
 static FORCEINLINE ULONG
 __Offset(
     __in STOR_PHYSICAL_ADDRESS   PhysAddr
@@ -875,46 +884,7 @@ __Offset(
 {
     return (ULONG)(PhysAddr.QuadPart & (PAGE_SIZE - 1));
 }
-static FORCEINLINE VOID
-__GetPhysAddr(
-    __in PSTOR_SCATTER_GATHER_LIST   SGList,
-    __inout PXENVBD_SG_INDEX         SGIndex,
-    __out PSTOR_PHYSICAL_ADDRESS     SGPhysAddr,
-    __out PULONG                     SGPhysLen
-    )
-{
-    PSTOR_SCATTER_GATHER_ELEMENT    SGElement;
 
-    ASSERT3U(SGIndex->Index, <, SGList->NumberOfElements);
-
-    SGElement = &SGList->List[SGIndex->Index];
-
-    SGPhysAddr->QuadPart = SGElement->PhysicalAddress.QuadPart + SGIndex->Offset;
-    *SGPhysLen           = __min(PAGE_SIZE - __Offset(*SGPhysAddr) - SGIndex->LastLength, SGElement->Length - SGIndex->Offset);
-
-    ASSERT3U(*SGPhysLen, <=, PAGE_SIZE);
-    ASSERT3U(SGIndex->Offset, <, SGElement->Length);
-
-    SGIndex->LastLength = *SGPhysLen; // gets reset every time for Granted, every 1or2 times for Bounced
-    SGIndex->Offset = SGIndex->Offset + *SGPhysLen;
-    if (SGIndex->Offset >= SGElement->Length) {
-        SGIndex->Index  = SGIndex->Index + 1;
-        SGIndex->Offset = 0;
-    }
-}
-__checkReturn
-static FORCEINLINE BOOLEAN
-__PhysAddrIsAligned(
-    __in STOR_PHYSICAL_ADDRESS   PhysAddr,
-    __in ULONG                   Length,
-    __in ULONG                   Alignment
-    )
-{
-    if ((PhysAddr.QuadPart & Alignment) || (Length & Alignment))
-        return FALSE;
-    else
-        return TRUE;
-}
 static FORCEINLINE PFN_NUMBER
 __Pfn(
     __in STOR_PHYSICAL_ADDRESS   PhysAddr
@@ -922,6 +892,7 @@ __Pfn(
 {
     return (PFN_NUMBER)(PhysAddr.QuadPart >> PAGE_SHIFT);
 }
+
 static FORCEINLINE MM_PAGE_PRIORITY
 __PdoPriority(
     __in PXENVBD_PDO             Pdo
@@ -935,6 +906,97 @@ __PdoPriority(
 
     return HighPagePriority;
 }
+
+static FORCEINLINE VOID
+SGListGet(
+    IN OUT  PXENVBD_SG_LIST         SGList
+    )
+{
+    PSTOR_SCATTER_GATHER_ELEMENT    SGElement;
+
+    ASSERT3U(SGList->Index, <, SGList->SGList->NumberOfElements);
+
+    SGElement = &SGList->SGList->List[SGList->Index];
+
+    SGList->PhysAddr.QuadPart = SGElement->PhysicalAddress.QuadPart + SGList->Offset;
+    SGList->PhysLen           = __min(PAGE_SIZE - __Offset(SGList->PhysAddr) - SGList->Length, SGElement->Length - SGList->Offset);
+
+    ASSERT3U(SGList->PhysLen, <=, PAGE_SIZE);
+    ASSERT3U(SGList->Offset, <, SGElement->Length);
+
+    SGList->Length = SGList->PhysLen; // gets reset every time for Granted, every 1or2 times for Bounced
+    SGList->Offset = SGList->Offset + SGList->PhysLen;
+    if (SGList->Offset >= SGElement->Length) {
+        SGList->Index  = SGList->Index + 1;
+        SGList->Offset = 0;
+    }
+}
+
+static FORCEINLINE BOOLEAN
+SGListNext(
+    IN OUT  PXENVBD_SG_LIST         SGList,
+    IN  ULONG                       AlignmentMask
+    )
+{
+    SGList->Length = 0;
+    SGListGet(SGList);  // get next PhysAddr and PhysLen
+    return !((SGList->PhysAddr.QuadPart & AlignmentMask) || (SGList->PhysLen & AlignmentMask));
+}
+
+static FORCEINLINE BOOLEAN
+MapSegmentBuffer(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_SEGMENT         Segment,
+    IN  PXENVBD_SG_LIST         SGList,
+    IN  ULONG                   SectorSize, // for ASSERTs
+    IN  ULONG                   SectorsNow  // for ASSERTs
+    )
+{
+    PMDL    Mdl;
+
+    // map PhysAddr to 1 or 2 pages and lock for VirtAddr
+#pragma warning(push)
+#pragma warning(disable:28145)
+    Mdl = &Segment->Mdl;
+    Mdl->Next           = NULL;
+    Mdl->Size           = (SHORT)(sizeof(MDL) + sizeof(PFN_NUMBER));
+    Mdl->MdlFlags       = MDL_PAGES_LOCKED;
+    Mdl->Process        = NULL;
+    Mdl->MappedSystemVa = NULL;
+    Mdl->StartVa        = NULL;
+    Mdl->ByteCount      = SGList->PhysLen;
+    Mdl->ByteOffset     = __Offset(SGList->PhysAddr);
+    Segment->Pfn[0]     = __Pfn(SGList->PhysAddr);
+
+    if (SGList->PhysLen < SectorsNow * SectorSize) {
+        SGListGet(SGList);
+        Mdl->Size       += sizeof(PFN_NUMBER);
+        Mdl->ByteCount  = Mdl->ByteCount + SGList->PhysLen;
+        Segment->Pfn[1] = __Pfn(SGList->PhysAddr);
+    }
+#pragma warning(pop)
+
+    ASSERT((Mdl->ByteCount & (SectorSize - 1)) == 0);
+    ASSERT3U(Mdl->ByteCount, <=, PAGE_SIZE);
+    ASSERT3U(SectorsNow, ==, (Mdl->ByteCount / SectorSize));
+                
+    Segment->Length = __min(Mdl->ByteCount, PAGE_SIZE);
+    Segment->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode, 
+                            MmCached, NULL, FALSE, __PdoPriority(Pdo));
+    if (!Segment->Buffer) {
+        goto fail;
+    }
+    __PdoIncMappedPages(Pdo, Segment->Pfn[0], Segment->Pfn[1]);
+
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Segment->Pfn[0]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Segment->Pfn[1]);
+ 
+    return TRUE;
+
+fail:
+    return FALSE;
+}
+
 __checkReturn
 static NTSTATUS
 PrepareReadWrite(
@@ -947,15 +1009,12 @@ PrepareReadWrite(
     UCHAR           Operation;
     BOOLEAN         ReadOnly;
     ULONG           Index;
-    ULONG           SectorsNow;
     LIST_ENTRY      ReqList;
 
-    PMDL             OriginalMDL;
+    PMDL            OriginalMDL;
     ULONG           GotMDL;
 
-    PSTOR_SCATTER_GATHER_LIST   SGList;
-    XENVBD_SG_INDEX             SGIndex;
-
+    XENVBD_SG_LIST  SGList;
     PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
 
@@ -967,22 +1026,19 @@ PrepareReadWrite(
 
     InitializeListHead(&ReqList);
 
-    SGList = StorPortGetScatterGatherList(PdoGetFdo(Pdo), Srb);
-    RtlZeroMemory(&SGIndex, sizeof(SGIndex));
-    GotMDL = StorPortGetOriginalMdl(PdoGetFdo(Pdo), Srb, &OriginalMDL);
+    RtlZeroMemory(&SGList, sizeof(SGList));
+    SGList.SGList = StorPortGetScatterGatherList(PdoGetFdo(Pdo), Srb);
 
+    GotMDL = StorPortGetOriginalMdl(PdoGetFdo(Pdo), Srb, &OriginalMDL);
     if (GotMDL !=STATUS_SUCCESS) {
         Warning("Didn't get mdl to check if mapped\n");
     }
-    
-    if (SrbExt == NULL)
-        goto fail;
 
     SectorsDone = 0;
     SrbExt->Count = 0;
     do {
         PXENVBD_REQUEST Request = __AllocRequest(Pdo);
-        if (!Request) {
+        if (Request == NULL) {
             Trace("Target[%d] : AllocRequest failed\n", PdoGetTargetId(Pdo));
             goto fail;
         }
@@ -995,45 +1051,32 @@ PrepareReadWrite(
         Request->FirstSector = StartSector + SectorsDone;
         Request->NrSectors  = 0; // not used for Read/Write
 
-        for (Index = 0; Index < BLKIF_MAX_SEGMENTS_PER_REQUEST; ++Index) {
-            STOR_PHYSICAL_ADDRESS   PhysAddr;
-            ULONG                   PhysLen;
-            PFN_NUMBER              Pfn;
-            ULONG                   GrantRef, FirstSector, LastSector;
+        for (Index = 0; Index < BLKIF_MAX_SEGMENTS_PER_REQUEST && SectorsDone != NumSectors; ++Index) {
+            PXENVBD_SEGMENT Segment = &Request->Segments[Index];
+            PFN_NUMBER      Pfn;
+            ULONG           SectorsNow;
 
             Request->NrSegments++;
             
-            SGIndex.LastLength = 0;
-            __GetPhysAddr(SGList, &SGIndex, &PhysAddr, &PhysLen);
-            if (__PhysAddrIsAligned(PhysAddr, PhysLen, SectorSize - 1)) {
+            if (SGListNext(&SGList, SectorSize - 1)) {
                 ++Pdo->GrantedSegments;
                 // get first sector, last sector and count
-                FirstSector = (__Offset(PhysAddr) + SectorSize - 1) / SectorSize;
-                SectorsNow  = __min(NumSectors - SectorsDone, SectorsPerPage - FirstSector);
-                LastSector  = FirstSector + SectorsNow - 1;
+                Segment->FirstSector    = (UCHAR)((__Offset(SGList.PhysAddr) + SectorSize - 1) / SectorSize);
+                SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage - Segment->FirstSector);
+                Segment->LastSector     = (UCHAR)(Segment->FirstSector + SectorsNow - 1);
+                Segment->BufferId       = NULL; // granted, ensure its null
+                Segment->Buffer         = NULL; // granted, ensure its null
+                Segment->Length         = 0;    // granted, ensure its 0
+                Pfn                     = __Pfn(SGList.PhysAddr);
 
-                ASSERT3U((PhysLen / SectorSize), ==, SectorsNow);
-                ASSERT3U((PhysLen & (SectorSize - 1)), ==, 0);
-               
-                // simples - grab Pfn of PhysAddr
-                Pfn         = __Pfn(PhysAddr);
-
-                // ensure NULL
-                Request->Segments[Index].Buffer         = NULL;
-                Request->Segments[Index].Length         = 0;
-                Request->Segments[Index].BufferId       = NULL;
+                ASSERT3U((SGList.PhysLen / SectorSize), ==, SectorsNow);
+                ASSERT3U((SGList.PhysLen & (SectorSize - 1)), ==, 0);
             } else {
-                PMDL        Mdl;
-                PVOID       BufferId;
-                PVOID       Buffer;
-                ULONG       Length;
-
-
                 ++Pdo->BouncedSegments;
                 // get first sector, last sector and count
-                FirstSector = 0;
-                SectorsNow  = __min(NumSectors - SectorsDone, SectorsPerPage);
-                LastSector  = SectorsNow - 1;
+                Segment->FirstSector    = 0;
+                SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage);
+                Segment->LastSector     = (UCHAR)(SectorsNow - 1);
 
                 // FIXME - This depends on an opaque MDL field, and should
                 // not be released to the public.  It is for investigation
@@ -1042,85 +1085,41 @@ PrepareReadWrite(
                     Warning("Mapping a previously kernel mapped MDL\n");
                 }
 
-                // map PhysAddr to 1 or 2 pages and lock for VirtAddr
-#pragma warning(push)
-#pragma warning(disable:28145)
-                Mdl = &Request->Segments[Index].Mdl;
-                Mdl->Next           = NULL;
-                Mdl->Size           = (SHORT)(sizeof(MDL) + sizeof(PFN_NUMBER));
-                Mdl->MdlFlags       = MDL_PAGES_LOCKED;
-                Mdl->Process        = NULL;
-                Mdl->MappedSystemVa = NULL;
-                Mdl->StartVa        = NULL;
-                Mdl->ByteCount      = PhysLen;
-                Mdl->ByteOffset     = __Offset(PhysAddr);
-                Request->Segments[Index].Pfn[0] = __Pfn(PhysAddr);
-#pragma warning(pop)
-
-                if (PhysLen < SectorsNow * SectorSize) {
-                    __GetPhysAddr(SGList, &SGIndex, &PhysAddr, &PhysLen);
-                    Mdl->Size       += sizeof(PFN_NUMBER);
-                    Mdl->ByteCount  = Mdl->ByteCount + PhysLen;
-                    Request->Segments[Index].Pfn[1] = __Pfn(PhysAddr);
-                }
-
-                ASSERT((Mdl->ByteCount & (SectorSize - 1)) == 0);
-                ASSERT3U(Mdl->ByteCount, <=, PAGE_SIZE);
-                ASSERT3U(SectorsNow, ==, (Mdl->ByteCount / SectorSize));
-                
-                Length = __min(Mdl->ByteCount, PAGE_SIZE);
-                Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode, 
-                                        MmCached, NULL, FALSE, __PdoPriority(Pdo));
-                if (!Buffer) {
+                // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
+                if (!MapSegmentBuffer(Pdo, Segment, &SGList, SectorSize, SectorsNow)) {
                     ++Pdo->MapFails;
                     Warning("Target[%d] : MmMapLockedPagesSpecifyCache failed\n", PdoGetTargetId(Pdo));
                     goto fail;
                 }
-                __PdoIncMappedPages(Pdo, Request->Segments[Index].Pfn[0], Request->Segments[Index].Pfn[1]);
 
-                ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Request->Segments[Index].Pfn[0]);
-                ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Request->Segments[Index].Pfn[1]);
-                
-                Request->Segments[Index].Buffer         = Buffer;
-                Request->Segments[Index].Length         = Length;
-
-                // get and fill a buffer
-                if (!BufferGet(Srb, &BufferId, &Pfn)) {
+                // get a buffer
+                if (!BufferGet(Srb, &Segment->BufferId, &Pfn)) {
                     ++Pdo->BounceFails;
                     Warning("Target[%d] : BufferGet failed\n", PdoGetTargetId(Pdo));
                     goto fail;
                 }
-                Request->Segments[Index].BufferId       = BufferId;
 
                 // copy contents in
                 if (Operation == BLKIF_OP_WRITE) {
-                    BufferCopyIn(BufferId, Buffer, Length);
+                    BufferCopyIn(Segment->BufferId, Segment->Buffer, Segment->Length);
                 }
             }
 
-            // Grant and Fill in last details
-            Status = GranterGet(Granter, Pfn, ReadOnly, &GrantRef);
+            // Grant segment's page
+            Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
             if (!NT_SUCCESS(Status)) {
                 ++Pdo->GrantOpFails;
                 Warning("Target[%d] : GNTTAB(Get) failed (%08x)\n", PdoGetTargetId(Pdo), Status);
                 goto fail;
             }
             
-            Request->Segments[Index].GrantRef       = GrantRef;
-            Request->Segments[Index].FirstSector    = (UCHAR)FirstSector;
-            Request->Segments[Index].LastSector     = (UCHAR)LastSector;
-
             SectorsDone += SectorsNow;
-            if (SectorsDone >= NumSectors) {
-                ASSERT3U(SectorsDone, ==, NumSectors);
-                goto done;
-            }
         }
         ASSERT3U(Request->NrSegments, >, 0);
         ASSERT3U(Request->NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
     } while (SectorsDone < NumSectors);
 
-done:
+    // completed preparing SRB, move requests to pending queue
     __UpdateStats(Pdo, Operation);
     for (;;) {
         PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
@@ -1150,14 +1149,9 @@ PrepareSyncCache(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    PXENVBD_SRBEXT          SrbExt = GetSrbExt(Srb);
-    PXENVBD_REQUEST         Request;
-    
-    if (SrbExt == NULL)
-        return STATUS_INSUFFICIENT_RESOURCES;
-
-    Request = __AllocRequest(Pdo);
-    if (!Request) {
+    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    PXENVBD_REQUEST Request = __AllocRequest(Pdo);
+    if (Request == NULL) {
         Trace("Target[%d] : AllocRequests failed\n", PdoGetTargetId(Pdo));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
