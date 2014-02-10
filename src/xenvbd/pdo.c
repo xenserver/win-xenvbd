@@ -62,6 +62,12 @@ typedef struct _XENVBD_SG_LIST {
 
 #define PDO_SIGNATURE           'odpX'
 
+typedef struct _XENVBD_LOOKASIDE {
+    KEVENT                      Empty;
+    LONG                        Used;
+    NPAGED_LOOKASIDE_LIST       List;
+} XENVBD_LOOKASIDE, *PXENVBD_LOOKASIDE;
+
 struct _XENVBD_PDO {
     ULONG                       Signature;
     PXENVBD_FDO                 Fdo;
@@ -89,9 +95,7 @@ struct _XENVBD_PDO {
     const CHAR*                 Reason;
 
     // SRBs
-    KEVENT                      RequestListEmpty;
-    LONG                        RequestListUsed;
-    NPAGED_LOOKASIDE_LIST       RequestList;
+    XENVBD_LOOKASIDE            RequestList;
     XENVBD_QUEUE                FreshSrbs;
     XENVBD_QUEUE                PreparedReqs;
     XENVBD_QUEUE                SubmittedReqs;
@@ -380,6 +384,65 @@ __PdoUnpauseDataPath(
     KeReleaseSpinLock(&Pdo->Lock, Irql);
 }
 
+static FORCEINLINE VOID
+__LookasideInit(
+    IN OUT  PXENVBD_LOOKASIDE   Lookaside,
+    IN  ULONG                   Size,
+    IN  ULONG                   Tag
+    )
+{
+    Lookaside->Used = 0;
+    KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
+    ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
+                                    Size, Tag, 0);
+}
+
+static FORCEINLINE VOID
+__LookasideTerm(
+    IN  PXENVBD_LOOKASIDE       Lookaside
+    )
+{
+    ASSERT3U(Lookaside->Used, ==, 0);
+    ExDeleteNPagedLookasideList(&Lookaside->List);
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
+}
+
+static FORCEINLINE PVOID
+__LookasideAlloc(
+    IN  PXENVBD_LOOKASIDE       Lookaside
+    )
+{
+    LONG    Result;
+    PVOID   Buffer;
+
+    Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
+    if (Buffer == NULL)
+        return NULL;
+
+    Result = InterlockedIncrement(&Lookaside->Used);
+    ASSERT3S(Result, >, 0);
+    KeClearEvent(&Lookaside->Empty);
+
+    return Buffer;
+}
+
+static FORCEINLINE VOID
+__LookasideFree(
+    IN  PXENVBD_LOOKASIDE       Lookaside,
+    IN  PVOID                   Buffer
+    )
+{
+    LONG            Result;
+
+    ExFreeToNPagedLookasideList(&Lookaside->List, Buffer);
+    Result = InterlockedDecrement(&Lookaside->Used);
+    ASSERT3S(Result, >=, 0);
+        
+    if (Result == 0) {
+        KeSetEvent(&Lookaside->Empty, IO_NO_INCREMENT, FALSE);
+    }
+}
+
 //=============================================================================
 // Creation/Deletion
 __checkReturn
@@ -426,10 +489,7 @@ PdoCreate(
     if (!NT_SUCCESS(Status))
         goto fail2;
 
-    Pdo->RequestListUsed = 0;
-    KeInitializeEvent(&Pdo->RequestListEmpty, SynchronizationEvent, TRUE);
-    ExInitializeNPagedLookasideList(&Pdo->RequestList, NULL, NULL, 0, 
-                                    sizeof(XENVBD_REQUEST), REQUEST_POOL_TAG, 0);
+    __LookasideInit(&Pdo->RequestList, sizeof(XENVBD_REQUEST), REQUEST_POOL_TAG);
 
     Status = PdoD3ToD0(Pdo);
     if (!NT_SUCCESS(Status))
@@ -448,7 +508,7 @@ fail4:
 
 fail3:
     Error("Fail3\n");
-    ExDeleteNPagedLookasideList(&Pdo->RequestList);
+    __LookasideTerm(&Pdo->RequestList);
     FrontendDestroy(Pdo->Frontend);
     Pdo->Frontend = NULL;
 
@@ -481,15 +541,14 @@ PdoDestroy(
     PdoDereference(Pdo); // drop initial ref count
 
     // Wait for ReferenceCount == 0 and RequestListUsed == 0
-    Verbose("Target[%d] : ReferenceCount %d, RequestListUsed %d\n", TargetId, Pdo->ReferenceCount, Pdo->RequestListUsed);
+    Verbose("Target[%d] : ReferenceCount %d, RequestListUsed %d\n", TargetId, Pdo->ReferenceCount, Pdo->RequestList.Used);
     Objects[0] = &Pdo->RemoveEvent;
-    Objects[1] = &Pdo->RequestListEmpty;
+    Objects[1] = &Pdo->RequestList.Empty;
     KeWaitForMultipleObjects(2, Objects, WaitAll, Executive, KernelMode, FALSE, NULL, NULL);
     ASSERT3S(Pdo->ReferenceCount, ==, 0);
     ASSERT3U(PdoGetDevicePnpState(Pdo), ==, Deleted);
 
-    ASSERT3U(Pdo->RequestListUsed, ==, 0);
-    ExDeleteNPagedLookasideList(&Pdo->RequestList);
+    __LookasideTerm(&Pdo->RequestList);
 
     FrontendDestroy(Pdo->Frontend);
     Pdo->Frontend = NULL;
@@ -866,16 +925,12 @@ RequestGet(
     )
 {
     PVOID   Request;
-    LONG    Result;
 
-    Request = ExAllocateFromNPagedLookasideList(&Pdo->RequestList);
+    Request = __LookasideAlloc(&Pdo->RequestList);
     if (Request == NULL)
         goto fail;
 
-    Result = InterlockedIncrement(&Pdo->RequestListUsed);
-    ASSERT3S(Result, >, 0);
     RtlZeroMemory(Request, sizeof(XENVBD_REQUEST));
-    KeClearEvent(&Pdo->RequestListEmpty);
     return Request;
 
 fail:
@@ -889,7 +944,6 @@ RequestPut(
     IN  PXENVBD_REQUEST         Request
     )
 {
-    LONG            Result;
     ULONG           Index;
     PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
 
@@ -924,13 +978,7 @@ RequestPut(
     }
 
     // Free the request to lookaside
-    ExFreeToNPagedLookasideList(&Pdo->RequestList, Request);
-    Result = InterlockedDecrement(&Pdo->RequestListUsed);
-    ASSERT3S(Result, >=, 0);
-        
-    if (Result == 0) {
-        KeSetEvent(&Pdo->RequestListEmpty, IO_NO_INCREMENT, FALSE);
-    }
+    __LookasideFree(&Pdo->RequestList, Request);
 }
 
 static FORCEINLINE VOID
