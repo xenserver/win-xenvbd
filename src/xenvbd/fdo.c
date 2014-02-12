@@ -1350,6 +1350,8 @@ FdoCompleteSrb(
     __in PSCSI_REQUEST_BLOCK         Srb
     )
 {
+    ASSERT3U(Srb->SrbStatus, !=, SRB_STATUS_PENDING);
+
     InterlockedDecrement(&Fdo->CurrentSrbs);
 
     StorPortNotification(RequestComplete, Fdo, Srb);

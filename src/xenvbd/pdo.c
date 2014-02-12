@@ -1045,6 +1045,9 @@ PrepareReadWrite(
 
     SectorsDone = 0;
     SrbExt->Count = 0;
+    // mark the SRB as pending, completion will check for pending to detect failures
+    Srb->SrbStatus = SRB_STATUS_PENDING;
+
     do {
         PXENVBD_REQUEST Request = RequestGet(Pdo);
         if (Request == NULL) 
@@ -1165,6 +1168,8 @@ PrepareSyncCache(
         return STATUS_UNSUCCESSFUL;
     
     SrbExt->Count = 1;
+    // mark the SRB as pending, completion will check for pending to detect failures
+    Srb->SrbStatus = SRB_STATUS_PENDING;
 
     Request->Srb = Srb;
     Request->Operation      = BLKIF_OP_WRITE_BARRIER;
@@ -1189,6 +1194,8 @@ PrepareUnmap(
         return STATUS_UNSUCCESSFUL;
 
     SrbExt->Count = 1;
+    // mark the SRB as pending, completion will check for pending to detect failures
+    Srb->SrbStatus = SRB_STATUS_PENDING;
 
     Request->Srb = Srb;
     Request->Operation      = BLKIF_OP_DISCARD;
@@ -1264,7 +1271,6 @@ PdoSubmitPrepared(
         }
 
         QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
-        Request->Srb->SrbStatus = SRB_STATUS_SUCCESS;
     }
 
     if (BlockRingPush(BlockRing)) {
@@ -1309,9 +1315,13 @@ PdoCompleteSubmitted(
 
     // complete srb
     if (InterlockedDecrement(&SrbExt->Count) == 0) {
-        if (Srb->SrbStatus == SRB_STATUS_SUCCESS) {
+        if (Srb->SrbStatus == SRB_STATUS_PENDING) {
+            // SRB has not hit a failure condition (BLKIF_RSP_ERROR | BLKIF_RSP_EOPNOTSUPP)
+            // from any of its responses. SRB must have succeeded
+            Srb->SrbStatus = SRB_STATUS_SUCCESS;
             Srb->ScsiStatus = 0x00; // SCSI_GOOD
         } else {
+            // Srb->SrbStatus has already been set by 1 or more requests with Status != BLKIF_RSP_OKAY
             Srb->ScsiStatus = 0x40; // SCSI_ABORTED
         }
 
