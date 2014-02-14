@@ -161,7 +161,7 @@ PdoIsPaused(
 
 __checkReturn
 extern ULONG
-PdoOutstandingSrbs(
+PdoOutstandingReqs(
     __in PXENVBD_PDO             Pdo
     );
 
@@ -177,13 +177,25 @@ PdoSectorSize(
     );
 
 // Queue-Related
-extern ULONG
+extern VOID
 PdoPrepareFresh(
     __in PXENVBD_PDO             Pdo
     );
 
-extern ULONG
+extern VOID
 PdoSubmitPrepared(
+    __in PXENVBD_PDO             Pdo
+    );
+
+extern VOID
+PdoCompleteSubmitted(
+    __in PXENVBD_PDO             Pdo,
+    __in PXENVBD_REQUEST         Request,
+    __in SHORT                   Status
+    );
+
+extern VOID
+PdoCompleteShutdown(
     __in PXENVBD_PDO             Pdo
     );
 
@@ -195,18 +207,6 @@ PdoPreResume(
 extern VOID
 PdoPostResume(
     __in PXENVBD_PDO             Pdo
-    );
-
-extern VOID
-PdoCompleteShutdown(
-    __in PXENVBD_PDO             Pdo
-    );
-
-extern VOID
-PdoCompleteSubmittedRequest(
-    __in PXENVBD_PDO             Pdo,
-    __in PXENVBD_REQUEST         Request,
-    __in SHORT                   Status
     );
 
 // StorPort Methods

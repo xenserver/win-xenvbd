@@ -1350,6 +1350,8 @@ FdoCompleteSrb(
     __in PSCSI_REQUEST_BLOCK         Srb
     )
 {
+    ASSERT3U(Srb->SrbStatus, !=, SRB_STATUS_PENDING);
+
     InterlockedDecrement(&Fdo->CurrentSrbs);
 
     StorPortNotification(RequestComplete, Fdo, Srb);
@@ -1480,14 +1482,7 @@ FdoBuildIo(
     __in PSCSI_REQUEST_BLOCK         Srb
     )
 {
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    if (SrbExt) {
-        RtlZeroMemory(SrbExt, sizeof(XENVBD_SRBEXT));
-        InitializeListHead(&SrbExt->RequestList);
-        SrbExt->Srb = Srb;
-    }
-    Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
+    InitSrbExt(Srb);
 
     switch (Srb->Function) {
     case SRB_FUNCTION_EXECUTE_SCSI:

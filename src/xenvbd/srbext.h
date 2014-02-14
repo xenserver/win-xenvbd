@@ -51,24 +51,40 @@ typedef struct _XENVBD_SEGMENT {
 } XENVBD_SEGMENT, *PXENVBD_SEGMENT;
 
 // Request - extension of blkif_request_t
-typedef struct _XENVBD_REQUEST {
-    LIST_ENTRY          Entry;          // XENVBD_SRBEXT.RequestList (list item)
-    PSCSI_REQUEST_BLOCK Srb;            // XENVBD_SRBEXT.Srb
-
-    UCHAR               Operation;
+typedef struct _XENVBD_REQUEST_READWRITE {
     UCHAR               NrSegments;
     ULONG64             FirstSector;
-    ULONG64             NrSectors;
     XENVBD_SEGMENT      Segments[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+} XENVBD_REQUEST_READWRITE, *PXENVBD_REQUEST_READWRITE;
+
+typedef struct _XENVBD_REQUEST_BARRIER {
+    ULONG64             FirstSector;
+} XENVBD_REQUEST_BARRIER, *PXENVBD_REQUEST_BARRIER;
+
+typedef struct _XENVBD_REQUEST_DISCARD {
+    UCHAR               Flags;  // {0, BLKIF_DISCARD_SECURE}
+    ULONG64             FirstSector;
+    ULONG64             NrSectors;
+} XENVBD_REQUEST_DISCARD, *PXENVBD_REQUEST_DISCARD;
+
+typedef struct _XENVBD_REQUEST {
+    PSCSI_REQUEST_BLOCK Srb;
+    LIST_ENTRY          Entry;
+
+    UCHAR               Operation;
+    union _XENVBD_REQUEST_TYPE {
+        XENVBD_REQUEST_READWRITE    ReadWrite;  // BLKIF_OP_{READ/WRITE}
+        XENVBD_REQUEST_BARRIER      Barrier;    // BLKIF_OP_WRITE_BARRIER
+        // nothing                              // BLKIF_OP_FLUSH_DISKCACHE
+        XENVBD_REQUEST_DISCARD      Discard;    // BLKIF_OP_DISCARD
+    } u;
 } XENVBD_REQUEST, *PXENVBD_REQUEST;
 
 // SRBExtension - context for SRBs
 typedef struct _XENVBD_SRBEXT {
-    PSCSI_REQUEST_BLOCK     Srb;        // Srb->SrbExtension == this
-    PVOID                   QueueHead;  // -> SRB_QUEUE
-    LIST_ENTRY              QueueEntry; // -> SRB_QUEUE.List (list item)
-    LIST_ENTRY              RequestList;// -> XENVBD_REQUEST.Entry (list head)
-    LONG                    RequestSize;// (list size)
+    PSCSI_REQUEST_BLOCK     Srb;
+    LIST_ENTRY              Entry;
+    LONG                    Count;
 } XENVBD_SRBEXT, *PXENVBD_SRBEXT;
 
 FORCEINLINE PXENVBD_SRBEXT
@@ -81,6 +97,19 @@ GetSrbExt(
         return Srb->SrbExtension;
     }
     return NULL;
+}
+
+FORCEINLINE VOID
+InitSrbExt(
+    __in PSCSI_REQUEST_BLOCK    Srb
+    )
+{
+    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
+    if (SrbExt) {
+        RtlZeroMemory(SrbExt, sizeof(XENVBD_SRBEXT));
+        SrbExt->Srb = Srb;
+    }
+    Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
 }
 
 #endif // _XENVBD_SRBEXT_H

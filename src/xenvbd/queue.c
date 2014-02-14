@@ -30,244 +30,111 @@
  */ 
 
 #include "queue.h"
-#include "srbext.h"
 #include "debug.h"
 #include "assert.h"
-#include <xencdb.h>
-
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static VOID
-__QueueRemoveLocked(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
-    )
-{
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    ASSERT3P(SrbExt, !=, NULL);
-    ASSERT3P(SrbExt->QueueHead, ==, Queue);
-    ASSERT3P(SrbExt->QueueEntry.Flink, !=, NULL);
-    ASSERT3P(SrbExt->QueueEntry.Blink, !=, NULL);
-
-    RemoveEntryList(&SrbExt->QueueEntry);
-    ASSERT3U(Queue->Count, !=, 0);
-    --Queue->Count;
-
-    SrbExt->QueueHead = NULL;
-    SrbExt->QueueEntry.Flink = SrbExt->QueueEntry.Blink = NULL;
-}
-
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE VOID
-__QueueInsertHeadLocked(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
-    )
-{
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    ASSERT3P(SrbExt, !=, NULL);
-    ASSERT3P(SrbExt->QueueHead, ==, NULL);
-    ASSERT3P(SrbExt->QueueEntry.Flink, ==, NULL);
-    ASSERT3P(SrbExt->QueueEntry.Blink, ==, NULL);
-
-    InsertHeadList(&Queue->List, &SrbExt->QueueEntry);
-    ++Queue->Count;
-    if (Queue->Count > Queue->MaxCount)
-        Queue->MaxCount = Queue->Count;
-
-    SrbExt->QueueHead = Queue;
-}
-
-__drv_requiresIRQL(DISPATCH_LEVEL)
-static FORCEINLINE VOID
-__QueueInsertTailLocked(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
-    )
-{
-    PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    ASSERT3P(SrbExt, !=, NULL);
-    ASSERT3P(SrbExt->QueueHead, ==, NULL);
-    ASSERT3P(SrbExt->QueueEntry.Flink, ==, NULL);
-    ASSERT3P(SrbExt->QueueEntry.Blink, ==, NULL);
-
-    InsertTailList(&Queue->List, &SrbExt->QueueEntry);
-    ++Queue->Count;
-    if (Queue->Count > Queue->MaxCount)
-        Queue->MaxCount = Queue->Count;
-
-    SrbExt->QueueHead = Queue;
-}
 
 VOID
 QueueInit(
-    __in PSRB_QUEUE          Queue
+    __in PXENVBD_QUEUE      Queue
     )
 {
+    RtlZeroMemory(Queue, sizeof(XENVBD_QUEUE));
     KeInitializeSpinLock(&Queue->Lock);
     InitializeListHead(&Queue->List);
 }
 
 ULONG
 QueueCount(
-    __in PSRB_QUEUE          Queue
+    __in PXENVBD_QUEUE      Queue
     )
 {
-    KIRQL               Irql;
-    ULONG               Count;
-
-    KeAcquireSpinLock(&Queue->Lock, &Irql);
-    
-    Count = Queue->Count;
-    
-    KeReleaseSpinLock(&Queue->Lock, Irql);
-
-    return Count;
+    return Queue->Current;
 }
 
 __checkReturn
-PSCSI_REQUEST_BLOCK
-QueuePeek(
-    __in PSRB_QUEUE          Queue
-    )
-{
-    KIRQL               Irql;
-    PSCSI_REQUEST_BLOCK Srb = NULL;
-
-    KeAcquireSpinLock(&Queue->Lock, &Irql);
-    
-    if (!IsListEmpty(&Queue->List)) {
-        PXENVBD_SRBEXT  SrbExt = CONTAINING_RECORD(Queue->List.Flink, XENVBD_SRBEXT, QueueEntry);
-        Srb = SrbExt->Srb;
-    }
-    
-    KeReleaseSpinLock(&Queue->Lock, Irql);
-
-    return Srb;
-}
-
-__checkReturn
-PSCSI_REQUEST_BLOCK
+PLIST_ENTRY
 QueuePop(
-    __in PSRB_QUEUE          Queue
+    __in PXENVBD_QUEUE      Queue
     )
 {
-    KIRQL               Irql;
-    PSCSI_REQUEST_BLOCK Srb = NULL;
+    KIRQL       Irql;
+    PLIST_ENTRY Entry = NULL;
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
 
     if (!IsListEmpty(&Queue->List)) {
-        PXENVBD_SRBEXT  SrbExt = CONTAINING_RECORD(Queue->List.Flink, XENVBD_SRBEXT, QueueEntry);
-        Srb = SrbExt->Srb;
-        __QueueRemoveLocked(Queue, Srb);
+        Entry = RemoveHeadList(&Queue->List);
+        ASSERT3P(Entry, !=, &Queue->List);
+        --Queue->Current;
     }
 
     KeReleaseSpinLock(&Queue->Lock, Irql);
 
-    return Srb;
-}
-
-__checkReturn
-PSCSI_REQUEST_BLOCK
-QueueRemoveTail(
-    __in PSRB_QUEUE          Queue
-    )
-{
-    KIRQL               Irql;
-    PSCSI_REQUEST_BLOCK Srb = NULL;
-
-    KeAcquireSpinLock(&Queue->Lock, &Irql);
-
-    if (!IsListEmpty(&Queue->List)) {
-        PXENVBD_SRBEXT  SrbExt = CONTAINING_RECORD(Queue->List.Blink, XENVBD_SRBEXT, QueueEntry);
-        Srb = SrbExt->Srb;
-        __QueueRemoveLocked(Queue, Srb);
-    }
-
-    KeReleaseSpinLock(&Queue->Lock, Irql);
-
-    return Srb;
+    return Entry;
 }
 
 VOID
-QueueInsertHead(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
+QueueUnPop(
+    __in PXENVBD_QUEUE      Queue,
+    __in PLIST_ENTRY        Entry
     )
 {
     KIRQL               Irql;
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
     
-    __QueueInsertHeadLocked(Queue, Srb);
+    InsertHeadList(&Queue->List, Entry);
+    if (++Queue->Current > Queue->Maximum)
+        Queue->Maximum = Queue->Current;
     
     KeReleaseSpinLock(&Queue->Lock, Irql);
 }
 
 VOID
-QueueInsertTail(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
+QueueAppend(
+    __in PXENVBD_QUEUE      Queue,
+    __in PLIST_ENTRY        Entry
     )
 {
     KIRQL               Irql;
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
     
-    __QueueInsertTailLocked(Queue, Srb);
+    InsertTailList(&Queue->List, Entry);
+    if (++Queue->Current > Queue->Maximum)
+        Queue->Maximum = Queue->Current;
     
     KeReleaseSpinLock(&Queue->Lock, Irql);
 }
 
 VOID
 QueueRemove(
-    __in PSRB_QUEUE          Queue,
-    __in PSCSI_REQUEST_BLOCK Srb
+    __in PXENVBD_QUEUE      Queue,
+    __in PLIST_ENTRY        Entry
     )
 {
     KIRQL               Irql;
 
     KeAcquireSpinLock(&Queue->Lock, &Irql);
 
-    __QueueRemoveLocked(Queue, Srb);
+    RemoveEntryList(Entry);
+    --Queue->Current;
     
     KeReleaseSpinLock(&Queue->Lock, Irql);
 }
 
 VOID
 QueueDebugCallback(
-    __in PSRB_QUEUE          Queue,
-    __in __nullterminated const CHAR *Name,
-    __in PXENBUS_DEBUG_INTERFACE Debug,
-    __in PXENBUS_DEBUG_CALLBACK  Callback
+    __in PXENVBD_QUEUE                  Queue,
+    __in __nullterminated const CHAR*   Name,
+    __in PXENBUS_DEBUG_INTERFACE        Debug,
+    __in PXENBUS_DEBUG_CALLBACK         Callback
     )
 {
-    PLIST_ENTRY     Entry;
-    ULONG           Index;
-
-    for (Entry = Queue->List.Flink, Index = 0;
-            Entry != &Queue->List;
-            Entry = Entry->Flink, ++Index) {
-
-        PXENVBD_SRBEXT  SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, QueueEntry);
-        PSCSI_REQUEST_BLOCK Srb = SrbExt->Srb;
-
-        DEBUG(Printf, Debug, Callback,
-                "QUEUE: %10s : [%-3d] : { 0x%p %s (%d) }\n",
-                Name, Index, Srb, Cdb_OperationName(Srb->Cdb[0]), 
-                SrbExt->RequestSize);
-    }
-
     DEBUG(Printf, Debug, Callback,
-            "QUEUE: %10s : Count    : %d\n", 
-            Name, Queue->Count);
-    DEBUG(Printf, Debug, Callback,
-            "QUEUE: %10s : MaxCount : %d\n", 
-            Name, Queue->MaxCount);
+            "QUEUE: %10s : %u / %u\n",
+            Name, Queue->Current, Queue->Maximum);
 
-    Queue->MaxCount = Queue->Count;
+    Queue->Maximum = Queue->Current;
 }
 

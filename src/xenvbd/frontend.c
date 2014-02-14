@@ -129,6 +129,26 @@ __FrontendFree(
 
 //=============================================================================
 // Accessors
+VOID
+FrontendRemoveFeature(
+    IN  PXENVBD_FRONTEND        Frontend,
+    IN  UCHAR                   BlkifOperation
+    )
+{
+    switch (BlkifOperation) {
+    case BLKIF_OP_FLUSH_DISKCACHE:
+        Frontend->Features.FlushCache = FALSE;
+        break;
+    case BLKIF_OP_WRITE_BARRIER:    
+        Frontend->Features.Barrier = FALSE; 
+        break;
+    case BLKIF_OP_DISCARD:
+        Frontend->Features.Discard = FALSE;
+        break;
+    default:
+        break;
+    }
+}
 PXENVBD_CAPS
 FrontendGetCaps(
     __in  PXENVBD_FRONTEND      Frontend
@@ -171,41 +191,28 @@ FrontendGetPdo(
 {
     return Frontend->Pdo;
 }
+PXENVBD_BLOCKRING
+FrontendGetBlockRing(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->BlockRing;
+}
+PXENVBD_NOTIFIER
+FrontendGetNotifier(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->Notifier;
+}
+PXENVBD_GRANTER
+FrontendGetGranter(
+    __in  PXENVBD_FRONTEND      Frontend
+    )
+{
+    return Frontend->Granter;
+}
 
-//=============================================================================
-// Interface indirection
-NTSTATUS
-FrontendGnttabGet(
-    __in  PXENVBD_FRONTEND      Frontend,
-    __in  PFN_NUMBER            Pfn,
-    __in  BOOLEAN               ReadOnly,
-    __out PULONG                GrantRef
-    )
-{
-    return GranterGet(Frontend->Granter, Pfn, ReadOnly, GrantRef);
-}
-VOID
-FrontendGnttabPut(
-    __in  PXENVBD_FRONTEND      Frontend,
-    __in  ULONG                 GrantRef
-    )
-{
-    GranterPut(Frontend->Granter, GrantRef);
-}
-VOID
-FrontendEvtchnTrigger(
-    __in  PXENVBD_FRONTEND      Frontend
-    )
-{
-    NotifierTrigger(Frontend->Notifier);
-}
-VOID
-FrontendEvtchnSend(
-    __in  PXENVBD_FRONTEND      Frontend
-    )
-{
-    NotifierSend(Frontend->Notifier);
-}
 NTSTATUS
 FrontendStoreWriteFrontend(
     __in  PXENVBD_FRONTEND      Frontend,
@@ -293,25 +300,6 @@ FrontendNotifyResponses(
     PdoPrepareFresh(Frontend->Pdo);
     PdoSubmitPrepared(Frontend->Pdo);
     PdoCompleteShutdown(Frontend->Pdo);
-}
-
-BOOLEAN
-FrontendSubmitRequest(
-    __in  PXENVBD_FRONTEND          Frontend,
-    __in  PSCSI_REQUEST_BLOCK       Srb
-    )
-{
-    return BlockRingSubmit(Frontend->BlockRing, Srb);
-}
-
-VOID
-FrontendPushRequests(
-    __in  PXENVBD_FRONTEND        Frontend
-    )
-{
-    if (BlockRingPush(Frontend->BlockRing)) {
-        NotifierSend(Frontend->Notifier);
-    }
 }
 
 //=============================================================================

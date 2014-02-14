@@ -68,6 +68,11 @@ typedef struct _XENVBD_DISKINFO {
 typedef struct _XENVBD_FRONTEND XENVBD_FRONTEND, *PXENVBD_FRONTEND;
 
 // Accessors
+extern VOID
+FrontendRemoveFeature(
+    IN  PXENVBD_FRONTEND        Frontend,
+    IN  UCHAR                   BlkifOperation
+    );
 extern PXENVBD_CAPS
 FrontendGetCaps(
     __in  PXENVBD_FRONTEND      Frontend
@@ -92,28 +97,22 @@ extern PXENVBD_PDO
 FrontendGetPdo(
     __in  PXENVBD_FRONTEND      Frontend
     );
+#include "blockring.h"
+extern PXENVBD_BLOCKRING
+FrontendGetBlockRing(
+    __in  PXENVBD_FRONTEND      Frontend
+    );
+#include "notifier.h"
+extern PXENVBD_NOTIFIER
+FrontendGetNotifier(
+    __in  PXENVBD_FRONTEND      Frontend
+    );
+#include "granter.h"
+extern PXENVBD_GRANTER
+FrontendGetGranter(
+    __in  PXENVBD_FRONTEND      Frontend
+    );
 
-// Interface indirection
-extern NTSTATUS
-FrontendGnttabGet(
-    __in  PXENVBD_FRONTEND      Frontend,
-    __in  PFN_NUMBER            Pfn,
-    __in  BOOLEAN               ReadOnly,
-    __out PULONG                GrantRef
-    );
-extern VOID
-FrontendGnttabPut(
-    __in  PXENVBD_FRONTEND      Frontend,
-    __in  ULONG                 GrantRef
-    );
-extern VOID
-FrontendEvtchnTrigger(
-    __in  PXENVBD_FRONTEND      Frontend
-    );
-extern VOID
-FrontendEvtchnSend(
-    __in  PXENVBD_FRONTEND      Frontend
-    );
 extern NTSTATUS
 FrontendStoreWriteFrontend(
     __in  PXENVBD_FRONTEND      Frontend,
@@ -142,17 +141,6 @@ __drv_requiresIRQL(DISPATCH_LEVEL)
 extern VOID
 FrontendNotifyResponses(
     __in  PXENVBD_FRONTEND        Frontend
-    );
-
-extern BOOLEAN
-FrontendSubmitRequest(
-    __in  PXENVBD_FRONTEND          Frontend,
-    __in  PSCSI_REQUEST_BLOCK       Srb
-    );
-
-extern VOID
-FrontendPushRequests(
-    __in  PXENVBD_FRONTEND          Frontend
     );
 
 // Init/Term
