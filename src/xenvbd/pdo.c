@@ -1265,12 +1265,13 @@ PdoSubmitPrepared(
             break;
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
 
+        QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
+        KeMemoryBarrier();
         if (!BlockRingSubmit(BlockRing, Request)) {
+            QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
             QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
             break;
         }
-
-        QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
     }
 
     if (BlockRingPush(BlockRing)) {
@@ -1916,8 +1917,8 @@ PdoReset(
     // Handles FreshSrbs and PreparedReqs
     PdoAbortAllSrbs(Pdo);
 
-    // SubmittedReqs
-    for (Count = 0; QueueCount(&Pdo->SubmittedReqs) && Count < (1ul << 24); ++Count) {
+    // SubmittedReqs (5 secs)
+    for (Count = 0; QueueCount(&Pdo->SubmittedReqs) && Count < 50000; ++Count) {
         FrontendNotifyResponses(Pdo->Frontend);
         NotifierSend(Notifier);
         StorPortStallExecution(100); // 100 micro-seconds
