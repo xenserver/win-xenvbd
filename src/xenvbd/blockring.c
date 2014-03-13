@@ -179,6 +179,7 @@ __BlockRingInsert(
 {
     ULONG                       Index;
     blkif_request_discard_t*    req_discard;
+    blkif_request_indirect_t*   req_indirect;
 
     switch (Request->Operation) {
     case BLKIF_OP_READ:
@@ -211,6 +212,19 @@ __BlockRingInsert(
         req_discard->id                 = __BlockRingGetTag(BlockRing, Request);
         req_discard->sector_number      = Request->u.Discard.FirstSector;
         req_discard->nr_sectors         = Request->u.Discard.NrSectors;
+        break;
+
+    case BLKIF_OP_INDIRECT:
+        req_indirect = (blkif_request_indirect_t*)req;
+        req_indirect->operation         = BLKIF_OP_INDIRECT;
+        req_indirect->indirect_op       = Request->u.Indirect.Operation;
+        req_indirect->nr_segments       = Request->u.Indirect.NrSegments;
+        req_indirect->id                = __BlockRingGetTag(BlockRing, Request);
+        req_indirect->sector_number     = Request->u.Indirect.FirstSector;
+        req_indirect->handle            = (USHORT)BlockRing->DeviceId;
+        for (Index = 0; Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST; ++Index) {
+            req_indirect->indirect_grefs[Index] = Request->u.Indirect.Grants[Index];
+        }
         break;
 
     default:
