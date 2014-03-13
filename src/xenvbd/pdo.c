@@ -208,8 +208,10 @@ PdoDebugCallback(
           Pdo->Missing ? Pdo->Reason : "Not Missing");
 
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: BLKIF_OP_: READ=%u WRITE=%u BARRIER=%u DISCARD=%u\n",
-          Pdo->BlkOpRead, Pdo->BlkOpWrite,
+          "PDO: BLKIF_OPs: READ=%u WRITE=%u\n",
+          Pdo->BlkOpRead, Pdo->BlkOpWrite);
+    DEBUG(Printf, DebugInterface, DebugCallback,
+          "PDO: BLKIF_OPs: BARRIER=%u DISCARD=%u\n",
           Pdo->BlkOpBarrier, Pdo->BlkOpDiscard);
     DEBUG(Printf, DebugInterface, DebugCallback,
           "PDO: Failed: Allocs=%u Maps=%u Bounces=%u Grants=%u\n",
@@ -219,7 +221,8 @@ PdoDebugCallback(
           "PDO: Segments Granted=%llu Bounced=%llu\n",
           Pdo->SegsGranted, Pdo->SegsBounced);
 
-    Pdo->BlkOpRead = Pdo->BlkOpWrite = Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
+    Pdo->BlkOpRead = Pdo->BlkOpWrite = 0;
+    Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
     Pdo->FailedAllocs = Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
     Pdo->SegsGranted = Pdo->SegsBounced = 0;
 
@@ -760,6 +763,21 @@ PdoSectorSize(
 
 //=============================================================================
 
+static FORCEINLINE VOID
+__PdoIncBlkifOpCount(
+    __in PXENVBD_PDO             Pdo,
+    __in PXENVBD_REQUEST         Request
+    )
+{
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:             ++Pdo->BlkOpRead;       break;
+    case BLKIF_OP_WRITE:            ++Pdo->BlkOpWrite;      break;
+    case BLKIF_OP_WRITE_BARRIER:    ++Pdo->BlkOpBarrier;    break;
+    case BLKIF_OP_DISCARD:          ++Pdo->BlkOpDiscard;    break;
+    default:                        ASSERT(FALSE);          break;
+    }
+}
+
 static FORCEINLINE ULONG
 __SectorsPerPage(
     __in ULONG                   SectorSize
@@ -1128,15 +1146,14 @@ PrepareReadWrite(
     } while (SectorsDone < NumSectors);
 
     // completed preparing SRB, move requests to pending queue
-    switch (Operation) {
-    case BLKIF_OP_READ:     Pdo->BlkOpRead++;       break;
-    case BLKIF_OP_WRITE:    Pdo->BlkOpWrite++;      break;
-    default:                ASSERT(FALSE);          break;
-    }
     for (;;) {
-        PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = RemoveHeadList(&ReqList);
         if (Entry == &ReqList)
             break;
+
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        __PdoIncBlkifOpCount(Pdo, Request);
         QueueAppend(&Pdo->PreparedReqs, Entry);
     }
     return STATUS_SUCCESS;
@@ -1144,9 +1161,10 @@ PrepareReadWrite(
 fail:
     for (;;) {
         PXENVBD_REQUEST Request;
-        PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
+        PLIST_ENTRY     Entry = RemoveHeadList(&ReqList);
         if (Entry == &ReqList)
             break;
+
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         RequestPut(Pdo, Request);
         InterlockedDecrement(&SrbExt->Count);
@@ -1176,7 +1194,7 @@ PrepareSyncCache(
 
     Request->u.Barrier.FirstSector = Cdb_LogicalBlock(Srb);
 
-    Pdo->BlkOpBarrier++;
+    __PdoIncBlkifOpCount(Pdo, Request);
     QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
     return STATUS_SUCCESS;
 }
@@ -1204,7 +1222,7 @@ PrepareUnmap(
     Request->u.Discard.NrSectors   = Cdb_TransferBlock(Srb);
     Request->u.Discard.Flags       = 0;
 
-    Pdo->BlkOpDiscard++;
+    __PdoIncBlkifOpCount(Pdo, Request);
     QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
     return STATUS_SUCCESS;
 }
