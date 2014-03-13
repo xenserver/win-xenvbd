@@ -1542,7 +1542,7 @@ PdoSyncCache(
         return TRUE;
     }
 
-    if (FrontendGetFeatures(Pdo->Frontend)->Barrier == FALSE) {
+    if (FrontendGetDiskInfo(Pdo->Frontend)->Barrier == FALSE) {
         Trace("Target[%d] : BARRIER not supported, suppressing\n", PdoGetTargetId(Pdo));
         Srb->ScsiStatus = 0x00; // SCSI_GOOD
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
@@ -1578,7 +1578,7 @@ PdoUnmap(
         return TRUE;
     }
 
-    if (FrontendGetFeatures(Pdo->Frontend)->Discard == FALSE) {
+    if (FrontendGetDiskInfo(Pdo->Frontend)->Discard == FALSE) {
         Trace("Target[%d] : DISCARD not supported, suppressing\n", PdoGetTargetId(Pdo));
         Srb->ScsiStatus = 0x00; // SCSI_GOOD
         Srb->SrbStatus = SRB_STATUS_SUCCESS;

@@ -137,13 +137,16 @@ FrontendRemoveFeature(
 {
     switch (BlkifOperation) {
     case BLKIF_OP_FLUSH_DISKCACHE:
-        Frontend->Features.FlushCache = FALSE;
+        Frontend->DiskInfo.FlushCache = FALSE;
         break;
     case BLKIF_OP_WRITE_BARRIER:    
-        Frontend->Features.Barrier = FALSE; 
+        Frontend->DiskInfo.Barrier = FALSE;
         break;
     case BLKIF_OP_DISCARD:
-        Frontend->Features.Discard = FALSE;
+        Frontend->DiskInfo.Discard = FALSE;
+        break;
+    case BLKIF_OP_INDIRECT:
+        Frontend->Features.Indirect = 0;
         break;
     default:
         break;
@@ -611,6 +614,8 @@ __ReadDiskInfo(
                                                     Frontend->DiskInfo.DiskInfo, &Updated);
     Frontend->DiskInfo.SectorSize   = __ReadValue32(Frontend, "sector-size", 
                                                     Frontend->DiskInfo.SectorSize, &Updated);
+    Frontend->DiskInfo.PhysSectorSize = __ReadValue32(Frontend, "physical-sector-size",
+                                                    Frontend->DiskInfo.PhysSectorSize, &Updated);
     Frontend->DiskInfo.SectorCount  = __ReadValue64(Frontend, "sectors", 
                                                     Frontend->DiskInfo.SectorCount, &Updated);
 
@@ -628,10 +633,14 @@ __ReadDiskInfo(
         if (Frontend->DiskInfo.SectorCount == 0) {
             Error("Target[%d] : Invalid SectorCount!\n", Frontend->TargetId);
         }
+        if (Frontend->DiskInfo.PhysSectorSize == 0) {
+            Frontend->DiskInfo.PhysSectorSize = Frontend->DiskInfo.SectorSize;
+        }
 
         // dump actual values
-        Verbose("Target[%d] : %lld sectors of %d bytes\n", Frontend->TargetId,
-                    Frontend->DiskInfo.SectorCount, Frontend->DiskInfo.SectorSize);
+        Verbose("Target[%d] : %lld sectors of %d bytes (%d)\n", Frontend->TargetId,
+                    Frontend->DiskInfo.SectorCount, Frontend->DiskInfo.SectorSize,
+                    Frontend->DiskInfo.PhysSectorSize);
         Verbose("Target[%d] : %d %s (%08x) %s\n", Frontend->TargetId,
                     __Size(&Frontend->DiskInfo), __Units(&Frontend->DiskInfo),
                     Frontend->DiskInfo.DiskInfo, 
@@ -788,16 +797,14 @@ FrontendPrepare(
 
     // read features and caps (removable, ring-order, ...)
     Frontend->Caps.Removable        = (__ReadValue32(Frontend, "removable", 0, NULL) == 1);
-    Frontend->Features.Barrier      = (__ReadValue32(Frontend, "feature-barrier", 0, NULL) == 1);
-    Frontend->Features.Discard      = (__ReadValue32(Frontend, "feature-discard", 0, NULL) == 1);
-    Frontend->Features.FlushCache   = (__ReadValue32(Frontend, "feature-flush-cache", 0, NULL) == 1);
+    Frontend->Features.Indirect     =  __ReadValue32(Frontend, "feature-max-indirect-segments", 0, NULL);
+    Frontend->Features.Persistent   = (__ReadValue32(Frontend, "feature-persistent", 0, NULL) == 1);
 
-    Verbose("Target[%d] : BackendId=%d, %s %s %s %s\n", 
+    Verbose("Target[%d] : BackendId=%u Indirect=%u %s%s\n",
                 Frontend->TargetId, Frontend->BackendId, 
-                Frontend->Caps.Removable ? "REMOVABLE" : "NOT_REMOVABLE",
-                Frontend->Features.Barrier ? "BARRIER" : "NOT_BARRIER",
-                Frontend->Features.Discard ? "DISCARD" : "NOT_DISCARD",
-                Frontend->Features.FlushCache ?  "FLUSH" : "NOT_FLUSH");
+                Frontend->Features.Indirect,
+                Frontend->Features.Persistent ? "PERSISTENT " : "",
+                Frontend->Caps.Removable ? "REMOVABLE" : "");
     
     return STATUS_SUCCESS;
 
@@ -928,6 +935,22 @@ abort:
 
     // read disk info
     __ReadDiskInfo(Frontend);
+
+    Frontend->DiskInfo.Barrier      = (__ReadValue32(Frontend, "feature-barrier", 0, NULL) == 1);
+    Frontend->DiskInfo.FlushCache   = (__ReadValue32(Frontend, "feature-flush-cache", 0, NULL) == 1);
+    Frontend->DiskInfo.Discard      = (__ReadValue32(Frontend, "feature-discard", 0, NULL) == 1);
+    Frontend->DiskInfo.DiscardSecure= (__ReadValue32(Frontend, "discard-secure", 0, NULL) == 1);
+    Frontend->DiskInfo.DiscardAlignment = __ReadValue32(Frontend, "discard-alignment", 0, NULL);
+    Frontend->DiskInfo.DiscardGranularity = __ReadValue32(Frontend, "discard-granularity", 0, NULL);
+
+    Verbose("Target[%d] : VBDFeatures %s%s%s (%s%x/%x)\n",
+                Frontend->DiskInfo.Barrier ? "BARRIER " : "",
+                Frontend->DiskInfo.FlushCache ?  "FLUSH " : "",
+                Frontend->DiskInfo.Discard ? "DISCARD " : "",
+                Frontend->DiskInfo.DiscardSecure ? "SECURE " : "",
+                Frontend->DiskInfo.DiscardAlignment,
+                Frontend->DiskInfo.DiscardGranularity);
+
     return STATUS_SUCCESS;
 
 fail8:
@@ -1429,41 +1452,32 @@ FrontendDebugCallback(
     DEBUG(Printf, Debug, Callback,
             "FRONTEND: State               : %s\n",
             __XenvbdStateName(Frontend->State));
+
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: Connected           : %s\n", 
-            Frontend->Caps.Connected ? "TRUE" : "FALSE");
+            "FRONTEND: Caps %s%s%s%s%s%s\n",
+            Frontend->Caps.Connected ? "CONNECTED " : "",
+            Frontend->Caps.Removable ? "REMOVABLE " : "",
+            Frontend->Caps.SurpriseRemovable ? "SURPRISE " : "",
+            Frontend->Caps.Paging ? "PAGING " : "",
+            Frontend->Caps.Hibernation ? "HIBER " : "",
+            Frontend->Caps.DumpFile ? "DUMP " : "");
+
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: Removable           : %s\n", 
-            Frontend->Caps.Removable ? "TRUE" : "FALSE");
+        "FRONTEND: Features (Indirect:%u) %s%s%s%s%s (%s%x/%x)\n",
+            Frontend->Features.Indirect,
+            Frontend->Features.Persistent ? "PERSISTENT " : "",
+            Frontend->DiskInfo.Barrier ? "BARRIER " : "",
+            Frontend->DiskInfo.FlushCache ? "FLUSH " : "",
+            Frontend->DiskInfo.Discard ? "DISCARD " : "",
+            Frontend->DiskInfo.DiscardSecure ? "SECURE " : "",
+            Frontend->DiskInfo.DiscardAlignment,
+            Frontend->DiskInfo.DiscardGranularity);
+
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: SurpriseRemovable   : %s\n", 
-            Frontend->Caps.SurpriseRemovable ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FeatureBarrier      : %s\n", 
-            Frontend->Features.Barrier ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FeatureDiscard      : %s\n", 
-            Frontend->Features.Discard ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FeatureFlushCache   : %s\n",
-            Frontend->Features.FlushCache ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: Paging              : %s\n", 
-            Frontend->Caps.Paging ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: Hibernation         : %s\n", 
-            Frontend->Caps.Hibernation ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: DumpFile            : %s\n", 
-            Frontend->Caps.DumpFile ? "TRUE" : "FALSE");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: SectorSize          : %d\n", 
-            Frontend->DiskInfo.SectorSize);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: SectorCount         : %lld\n", 
-            Frontend->DiskInfo.SectorCount);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: DiskInfo            : %d\n", 
+            "FRONTEND: DiskInfo %llu @ %u (%u) %08x\n",
+            Frontend->DiskInfo.SectorCount,
+            Frontend->DiskInfo.SectorSize,
+            Frontend->DiskInfo.PhysSectorSize,
             Frontend->DiskInfo.DiskInfo);
 
     GranterDebugCallback(Frontend->Granter, Debug, Callback);
