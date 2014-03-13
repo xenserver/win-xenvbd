@@ -516,6 +516,8 @@ BlockRingPoll(
                 --BlockRing->Outstanding;
                 PdoCompleteSubmitted(Pdo, Request, Response->status);
             }
+
+            RtlZeroMemory(Response, sizeof(union blkif_sring_entry));
         }
 
         KeMemoryBarrier();
