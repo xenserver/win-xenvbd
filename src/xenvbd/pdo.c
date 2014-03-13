@@ -65,6 +65,8 @@ typedef struct _XENVBD_SG_LIST {
 typedef struct _XENVBD_LOOKASIDE {
     KEVENT                      Empty;
     LONG                        Used;
+    LONG                        Max;
+    ULONG                       Failed;
     NPAGED_LOOKASIDE_LIST       List;
 } XENVBD_LOOKASIDE, *PXENVBD_LOOKASIDE;
 
@@ -107,7 +109,6 @@ struct _XENVBD_PDO {
     ULONG                       BlkOpBarrier;
     ULONG                       BlkOpDiscard;
     // Stats - Failures
-    ULONG                       FailedAllocs;
     ULONG                       FailedMaps;
     ULONG                       FailedBounces;
     ULONG                       FailedGrants;
@@ -167,6 +168,23 @@ __PnpStateName(
     }
 }
 
+static FORCEINLINE VOID
+__LookasideDebug(
+    IN  PXENVBD_LOOKASIDE           Lookaside,
+    IN  PXENBUS_DEBUG_INTERFACE     Debug,
+    IN  PXENBUS_DEBUG_CALLBACK      Callback,
+    IN  PCHAR                       Name
+    )
+{
+    DEBUG(Printf, Debug, Callback,
+          "PDO: %s: %u / %u (%u failed)\n",
+          Name, Lookaside->Used,
+          Lookaside->Max, Lookaside->Failed);
+
+    Lookaside->Max = Lookaside->Used;
+    Lookaside->Failed = 0;
+}
+
 DECLSPEC_NOINLINE VOID
 PdoDebugCallback(
     __in PXENVBD_PDO Pdo,
@@ -214,16 +232,17 @@ PdoDebugCallback(
           "PDO: BLKIF_OPs: BARRIER=%u DISCARD=%u\n",
           Pdo->BlkOpBarrier, Pdo->BlkOpDiscard);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Failed: Allocs=%u Maps=%u Bounces=%u Grants=%u\n",
-          Pdo->FailedAllocs, Pdo->FailedMaps,
-          Pdo->FailedBounces, Pdo->FailedGrants);
+          "PDO: Failed: Maps=%u Bounces=%u Grants=%u\n",
+          Pdo->FailedMaps, Pdo->FailedBounces, Pdo->FailedGrants);
     DEBUG(Printf, DebugInterface, DebugCallback,
           "PDO: Segments Granted=%llu Bounced=%llu\n",
           Pdo->SegsGranted, Pdo->SegsBounced);
 
+    __LookasideDebug(&Pdo->RequestList, DebugInterface, DebugCallback, "REQUESTs");
+
     Pdo->BlkOpRead = Pdo->BlkOpWrite = 0;
     Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
-    Pdo->FailedAllocs = Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
+    Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
     Pdo->SegsGranted = Pdo->SegsBounced = 0;
 
     FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
@@ -394,7 +413,7 @@ __LookasideInit(
     IN  ULONG                   Tag
     )
 {
-    Lookaside->Used = 0;
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
     KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
     ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
                                     Size, Tag, 0);
@@ -419,11 +438,15 @@ __LookasideAlloc(
     PVOID   Buffer;
 
     Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
-    if (Buffer == NULL)
+    if (Buffer == NULL) {
+        ++Lookaside->Failed;
         return NULL;
+    }
 
     Result = InterlockedIncrement(&Lookaside->Used);
     ASSERT3S(Result, >, 0);
+    if (Result > Lookaside->Max)
+        Lookaside->Max = Result;
     KeClearEvent(&Lookaside->Empty);
 
     return Buffer;
@@ -942,18 +965,10 @@ RequestGet(
     IN  PXENVBD_PDO             Pdo
     )
 {
-    PVOID   Request;
-
-    Request = __LookasideAlloc(&Pdo->RequestList);
-    if (Request == NULL)
-        goto fail;
-
-    RtlZeroMemory(Request, sizeof(XENVBD_REQUEST));
-    return Request;
-
-fail:
-    ++Pdo->FailedAllocs;
-    return NULL;
+    PVOID   Value = __LookasideAlloc(&Pdo->RequestList);
+    if (Value)
+        RtlZeroMemory(Value, sizeof(XENVBD_REQUEST));
+    return Value;
 }
 
 static FORCEINLINE VOID
