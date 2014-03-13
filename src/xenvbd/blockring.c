@@ -40,6 +40,9 @@
 #include <stdlib.h>
 #include <xenvbd-ntstrsafe.h>
 
+#define MAX_OUTSTANDING_REQUESTS    256
+#define TAG_HEADER                  'gaTX'
+
 struct _XENVBD_BLOCKRING {
     PXENVBD_FRONTEND                Frontend;
     BOOLEAN                         Connected;
@@ -57,6 +60,7 @@ struct _XENVBD_BLOCKRING {
     ULONG                           Outstanding;
     ULONG                           Submitted;
     ULONG                           Recieved;
+    PXENVBD_REQUEST                 Tags[MAX_OUTSTANDING_REQUESTS];
 };
 
 #define MAX_NAME_LEN                64
@@ -108,6 +112,64 @@ __Pfn(
     return (PFN_NUMBER)(ULONG_PTR)(MmGetPhysicalAddress(VirtAddr).QuadPart >> PAGE_SHIFT);
 }
 
+static FORCEINLINE ULONG64
+__BlockRingGetTag(
+    IN  PXENVBD_BLOCKRING           BlockRing,
+    IN  PXENVBD_REQUEST             Request
+    )
+{
+    USHORT      Index;
+
+    for (Index = 0; Index < MAX_OUTSTANDING_REQUESTS; ++Index) {
+        if (BlockRing->Tags[Index] == NULL) {
+            BlockRing->Tags[Index] = Request;
+
+            ++Index; // Tag value of 0 is invalid - make tags 1-based
+            return (((ULONG64)TAG_HEADER << 32) | ((ULONG64)Index << 16) | (ULONG64)Index);
+        }
+    }
+
+    Error("GET_TAG - out of free tags\n");
+    return ((ULONG64)TAG_HEADER << 32) | 0xFFFFFFFF;
+}
+
+static FORCEINLINE PXENVBD_REQUEST
+__BlockRingPutTag(
+    IN  PXENVBD_BLOCKRING           BlockRing,
+    IN  ULONG64                     Tag
+    )
+{
+    PXENVBD_REQUEST Request;
+    ULONG           Header;
+    USHORT          Tag1, Tag2;
+
+    Header  = (ULONG)((Tag >> 32) & 0xFFFFFFFF);
+    Tag1    = (USHORT)((Tag >> 16) & 0xFFFF);
+    Tag2    = (USHORT)(Tag & 0xFFFF);
+
+    if (Header != TAG_HEADER) {
+        Error("PUT_TAG (%llx) TAG_HEADER (%08x%04x%04x)\n", Tag, Header, Tag1, Tag2);
+        return NULL;
+    }
+    if (Tag1 != Tag2) {
+        Error("PUT_TAG (%llx) Tag1 != Tag2 (%08x%04x%04x)\n", Tag, Header, Tag1, Tag2);
+        return NULL;
+    }
+    if (Tag1 == 0) {
+        Error("PUT_TAG (%llx) Tag1 == 0 (%08x%04x%04x)\n", Tag, Header, Tag1, Tag2);
+        return NULL;
+    }
+    if (Tag1 > MAX_OUTSTANDING_REQUESTS) {
+        Error("PUT_TAG (%llx) Tag1 > %x (%08x%04x%04x)\n", Tag, MAX_OUTSTANDING_REQUESTS, Header, Tag1, Tag2);
+        return NULL;
+    }
+
+    Request = BlockRing->Tags[Tag1 - 1];
+    BlockRing->Tags[Tag1 - 1] = NULL;
+
+    return Request;
+}
+
 static FORCEINLINE VOID
 __BlockRingInsert(
     IN  PXENVBD_BLOCKRING           BlockRing,
@@ -121,34 +183,34 @@ __BlockRingInsert(
     switch (Request->Operation) {
     case BLKIF_OP_READ:
     case BLKIF_OP_WRITE:
-        req->operation          = Request->Operation;
-        req->nr_segments        = Request->u.ReadWrite.NrSegments;
-        req->handle             = (USHORT)BlockRing->DeviceId;
-        req->id                 = (ULONG64)Request;
-        req->sector_number      = Request->u.ReadWrite.FirstSector;
+        req->operation                  = Request->Operation;
+        req->nr_segments                = Request->u.ReadWrite.NrSegments;
+        req->handle                     = (USHORT)BlockRing->DeviceId;
+        req->id                         = __BlockRingGetTag(BlockRing, Request);
+        req->sector_number              = Request->u.ReadWrite.FirstSector;
         for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
-            req->seg[Index].gref       = Request->u.ReadWrite.Segments[Index].GrantRef;
-            req->seg[Index].first_sect = Request->u.ReadWrite.Segments[Index].FirstSector;
-            req->seg[Index].last_sect  = Request->u.ReadWrite.Segments[Index].LastSector;
+            req->seg[Index].gref        = Request->u.ReadWrite.Segments[Index].GrantRef;
+            req->seg[Index].first_sect  = Request->u.ReadWrite.Segments[Index].FirstSector;
+            req->seg[Index].last_sect   = Request->u.ReadWrite.Segments[Index].LastSector;
         }
         break;
 
     case BLKIF_OP_WRITE_BARRIER:
-        req->operation          = Request->Operation;
-        req->nr_segments        = 0;
-        req->handle             = (USHORT)BlockRing->DeviceId;
-        req->id                 = (ULONG64)Request;
-        req->sector_number      = Request->u.Barrier.FirstSector;
+        req->operation                  = Request->Operation;
+        req->nr_segments                = 0;
+        req->handle                     = (USHORT)BlockRing->DeviceId;
+        req->id                         = __BlockRingGetTag(BlockRing, Request);
+        req->sector_number              = Request->u.Barrier.FirstSector;
         break;
 
     case BLKIF_OP_DISCARD:
         req_discard = (blkif_request_discard_t*)req;
-        req_discard->operation       = BLKIF_OP_DISCARD;
-        req_discard->flag            = Request->u.Discard.Flags;
-        req_discard->handle          = (USHORT)BlockRing->DeviceId;
-        req_discard->id              = (ULONG64)Request;
-        req_discard->sector_number   = Request->u.Discard.FirstSector;
-        req_discard->nr_sectors      = Request->u.Discard.NrSectors;
+        req_discard->operation          = BLKIF_OP_DISCARD;
+        req_discard->flag               = Request->u.Discard.Flags;
+        req_discard->handle             = (USHORT)BlockRing->DeviceId;
+        req_discard->id                 = __BlockRingGetTag(BlockRing, Request);
+        req_discard->sector_number      = Request->u.Discard.FirstSector;
+        req_discard->nr_sectors         = Request->u.Discard.NrSectors;
         break;
 
     default:
@@ -430,42 +492,38 @@ BlockRingPoll(
     for (;;) {
         ULONG   rsp_prod;
         ULONG   rsp_cons;
-        int     Notify;
+
+        KeMemoryBarrier();
 
         rsp_prod = BlockRing->SharedRing->rsp_prod;
         rsp_cons = BlockRing->FrontRing.rsp_cons;
 
-        xen_mb();
+        KeMemoryBarrier();
+
+        if (rsp_cons == rsp_prod)
+            break;
 
         while (rsp_cons != rsp_prod) {
             blkif_response_t*   Response;
             PXENVBD_REQUEST     Request;
-            SHORT               Status;
 
             Response = RING_GET_RESPONSE(&BlockRing->FrontRing, rsp_cons);
-            Status = Response->status;
-            Request = (PXENVBD_REQUEST)(ULONG_PTR)(Response->id);
-
             ++rsp_cons;
 
-            ++BlockRing->Recieved;
-            --BlockRing->Outstanding;
-
+            Request = __BlockRingPutTag(BlockRing, Response->id);
             if (Request) {
-                PdoCompleteSubmitted(Pdo, Request, Status);
+                ++BlockRing->Recieved;
+                --BlockRing->Outstanding;
+                PdoCompleteSubmitted(Pdo, Request, Response->status);
             }
 
-            // zero request slot now its read
-            RtlZeroMemory(Response, sizeof(blkif_response_t));
+            RtlZeroMemory(Response, sizeof(union blkif_sring_entry));
         }
 
+        KeMemoryBarrier();
+
         BlockRing->FrontRing.rsp_cons = rsp_cons;
-
-        xen_mb();
-
-        RING_FINAL_CHECK_FOR_RESPONSES(&BlockRing->FrontRing, Notify);
-        if (!Notify)
-            break;
+        BlockRing->SharedRing->rsp_event = rsp_cons + 1;
     }
 
 done:
@@ -481,15 +539,16 @@ BlockRingSubmit(
     KIRQL               Irql;
     blkif_request_t*    req;
 
+    KeAcquireSpinLock(&BlockRing->Lock, &Irql);
     if (RING_FULL(&BlockRing->FrontRing)) {
+        KeReleaseSpinLock(&BlockRing->Lock, Irql);
         return FALSE;
     }
 
-    KeAcquireSpinLock(&BlockRing->Lock, &Irql);
-
     req = RING_GET_REQUEST(&BlockRing->FrontRing, BlockRing->FrontRing.req_prod_pvt);
-    ++BlockRing->FrontRing.req_prod_pvt;
     __BlockRingInsert(BlockRing, Request, req);
+    KeMemoryBarrier();
+    ++BlockRing->FrontRing.req_prod_pvt;
 
     KeReleaseSpinLock(&BlockRing->Lock, Irql);
     return TRUE;
