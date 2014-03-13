@@ -1040,6 +1040,125 @@ RequestCopyOutput(
     }
 }
 
+static NTSTATUS
+PrepareSegment(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_SEGMENT         Segment,
+    IN  PXENVBD_CONTEXT         Context,
+    IN  PXENVBD_SG_LIST         SGList,
+    IN  BOOLEAN                 ReadOnly,
+    IN  ULONG                   SectorsLeft,
+    OUT PULONG                  SectorsNow
+    )
+{
+    PFN_NUMBER      Pfn;
+    NTSTATUS        Status = STATUS_UNSUCCESSFUL;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
+    const ULONG     SectorSize = PdoSectorSize(Pdo);
+    const ULONG     SectorsPerPage = __SectorsPerPage(SectorSize);
+
+    if (SGListNext(SGList, SectorSize - 1)) {
+        ++Pdo->SegsGranted;
+        // get first sector, last sector and count
+        Segment->FirstSector    = (UCHAR)((__Offset(SGList->PhysAddr) + SectorSize - 1) / SectorSize);
+        *SectorsNow             = __min(SectorsLeft, SectorsPerPage - Segment->FirstSector);
+        Segment->LastSector     = (UCHAR)(Segment->FirstSector + *SectorsNow - 1);
+        Context->BufferId       = NULL; // granted, ensure its null
+        Context->Buffer         = NULL; // granted, ensure its null
+        Context->Length         = 0;    // granted, ensure its 0
+        Pfn                     = __Pfn(SGList->PhysAddr);
+
+        ASSERT3U((SGList->PhysLen / SectorSize), ==, *SectorsNow);
+        ASSERT3U((SGList->PhysLen & (SectorSize - 1)), ==, 0);
+    } else {
+        ++Pdo->SegsBounced;
+        // get first sector, last sector and count
+        Segment->FirstSector    = 0;
+        *SectorsNow             = __min(SectorsLeft, SectorsPerPage);
+        Segment->LastSector     = (UCHAR)(*SectorsNow - 1);
+
+        // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
+        if (!MapSegmentBuffer(Pdo, Context, SGList, SectorSize, *SectorsNow)) {
+            ++Pdo->FailedMaps;
+            goto fail;
+        }
+
+        // get a buffer
+        if (!BufferGet(Segment, &Context->BufferId, &Pfn)) {
+            ++Pdo->FailedBounces;
+            goto fail;
+        }
+
+        // copy contents in
+        if (ReadOnly) { // Operation == BLKIF_OP_WRITE
+            BufferCopyIn(Context->BufferId, Context->Buffer, Context->Length);
+        }
+    }
+
+    // Grant segment's page
+    Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
+    if (!NT_SUCCESS(Status)) {
+        ++Pdo->FailedGrants;
+        goto fail;
+    }
+
+    return STATUS_SUCCESS;
+
+fail:
+    return Status;
+}
+
+static NTSTATUS
+PrepareBlkifReadWrite(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_REQUEST         Request,
+    IN  PXENVBD_SG_LIST         SGList,
+    IN  ULONG64                 SectorStart,
+    IN  ULONG                   SectorsLeft,
+    OUT PULONG                  SectorsDone
+    )
+{
+    NTSTATUS        Status;
+    UCHAR           Operation;
+    BOOLEAN         ReadOnly;
+    ULONG           Index;
+    __Operation(Cdb_OperationEx(Request->Srb), &Operation, &ReadOnly);
+
+    Request->Operation  = Operation;
+    Request->u.ReadWrite.NrSegments = 0;
+    Request->u.ReadWrite.FirstSector = SectorStart;
+
+    for (Index = 0;
+                Index < BLKIF_MAX_SEGMENTS_PER_REQUEST &&
+                SectorsLeft > 0;
+                        ++Index) {
+        PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+        PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
+        ULONG           SectorsNow;
+
+        Request->u.ReadWrite.NrSegments++;
+        Status = PrepareSegment(Pdo,
+                                Segment,
+                                Context,
+                                SGList,
+                                ReadOnly,
+                                SectorsLeft,
+                                &SectorsNow);
+        if (!NT_SUCCESS(Status))
+            goto fail;
+
+        *SectorsDone += SectorsNow;
+        SectorsLeft  -= SectorsNow;
+    }
+    ASSERT3U(Request->u.ReadWrite.NrSegments, >, 0);
+    ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+
+    return STATUS_SUCCESS;
+
+fail:
+    return Status;
+}
+
 __checkReturn
 static NTSTATUS
 PrepareReadWrite(
@@ -1048,119 +1167,44 @@ PrepareReadWrite(
     )
 {
     NTSTATUS        Status;
-    ULONG           SectorsDone;
-    UCHAR           Operation;
-    BOOLEAN         ReadOnly;
-    ULONG           Index;
     LIST_ENTRY      ReqList;
-
-    PMDL            OriginalMDL;
-    ULONG           GotMDL;
-
     XENVBD_SG_LIST  SGList;
-    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    const ULONG64   StartSector     = Cdb_LogicalBlock(Srb);
-    const ULONG     NumSectors      = Cdb_TransferBlock(Srb);
-    const ULONG     SectorSize      = PdoSectorSize(Pdo);
-    const ULONG     SectorsPerPage  = __SectorsPerPage(SectorSize);
-    __Operation(Cdb_OperationEx(Srb), &Operation, &ReadOnly);
+    ULONG64         SectorStart = Cdb_LogicalBlock(Srb);
+    ULONG           SectorsLeft = Cdb_TransferBlock(Srb);
 
     InitializeListHead(&ReqList);
-
     RtlZeroMemory(&SGList, sizeof(SGList));
     SGList.SGList = StorPortGetScatterGatherList(PdoGetFdo(Pdo), Srb);
 
-    GotMDL = StorPortGetOriginalMdl(PdoGetFdo(Pdo), Srb, &OriginalMDL);
-    if (GotMDL !=STATUS_SUCCESS) {
-        Warning("Didn't get mdl to check if mapped\n");
-    }
-
-    SectorsDone = 0;
     SrbExt->Count = 0;
     // mark the SRB as pending, completion will check for pending to detect failures
     Srb->SrbStatus = SRB_STATUS_PENDING;
 
-    do {
+    while (SectorsLeft > 0) {
+        ULONG           SectorsDone = 0;
         PXENVBD_REQUEST Request = RequestGet(Pdo);
+
+        Status = STATUS_NO_MEMORY;
         if (Request == NULL) 
             goto fail;
         
+        Request->Srb        = Srb;
         InsertTailList(&ReqList, &Request->Entry);
         InterlockedIncrement(&SrbExt->Count);
 
-        Request->Srb        = Srb;
-        Request->Operation  = Operation;
+        Status = PrepareBlkifReadWrite(Pdo,
+                                       Request,
+                                       &SGList,
+                                       SectorStart,
+                                       SectorsLeft,
+                                       &SectorsDone);
+        if (!NT_SUCCESS(Status))
+            goto fail;
 
-        Request->u.ReadWrite.NrSegments = 0;
-        Request->u.ReadWrite.FirstSector = StartSector + SectorsDone;
-        for (Index = 0; Index < BLKIF_MAX_SEGMENTS_PER_REQUEST && SectorsDone != NumSectors; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
-            PFN_NUMBER      Pfn;
-            ULONG           SectorsNow;
-
-            Request->u.ReadWrite.NrSegments++;
-            
-            if (SGListNext(&SGList, SectorSize - 1)) {
-                ++Pdo->SegsGranted;
-                // get first sector, last sector and count
-                Segment->FirstSector    = (UCHAR)((__Offset(SGList.PhysAddr) + SectorSize - 1) / SectorSize);
-                SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage - Segment->FirstSector);
-                Segment->LastSector     = (UCHAR)(Segment->FirstSector + SectorsNow - 1);
-                Context->BufferId       = NULL; // granted, ensure its null
-                Context->Buffer         = NULL; // granted, ensure its null
-                Context->Length         = 0;    // granted, ensure its 0
-                Pfn                     = __Pfn(SGList.PhysAddr);
-
-                ASSERT3U((SGList.PhysLen / SectorSize), ==, SectorsNow);
-                ASSERT3U((SGList.PhysLen & (SectorSize - 1)), ==, 0);
-            } else {
-                ++Pdo->SegsBounced;
-                // get first sector, last sector and count
-                Segment->FirstSector    = 0;
-                SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage);
-                Segment->LastSector     = (UCHAR)(SectorsNow - 1);
-
-                // FIXME - This depends on an opaque MDL field, and should
-                // not be released to the public.  It is for investigation
-                // purposes only
-                if ((GotMDL == STATUS_SUCCESS) && ((OriginalMDL->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA) != 0)) {
-                    Warning("Mapping a previously kernel mapped MDL\n");
-                }
-
-                // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
-                if (!MapSegmentBuffer(Pdo, Context, &SGList, SectorSize, SectorsNow)) {
-                    ++Pdo->FailedMaps;
-                    goto fail;
-                }
-
-                // get a buffer
-                if (!BufferGet(Srb, &Context->BufferId, &Pfn)) {
-                    ++Pdo->FailedBounces;
-                    goto fail;
-                }
-
-                // copy contents in
-                if (Operation == BLKIF_OP_WRITE) {
-                    BufferCopyIn(Context->BufferId, Context->Buffer, Context->Length);
-                }
-            }
-
-            // Grant segment's page
-            Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
-            if (!NT_SUCCESS(Status)) {
-                ++Pdo->FailedGrants;
-                goto fail;
-            }
-            
-            SectorsDone += SectorsNow;
-        }
-        ASSERT3U(Request->u.ReadWrite.NrSegments, >, 0);
-        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
-
-    } while (SectorsDone < NumSectors);
+        SectorsLeft -= SectorsDone;
+        SectorStart += SectorsDone;
+    }
 
     // completed preparing SRB, move requests to pending queue
     for (;;) {
@@ -1187,7 +1231,8 @@ fail:
         InterlockedDecrement(&SrbExt->Count);
     }
     ASSERT3S(SrbExt->Count, ==, 0);
-    return STATUS_UNSUCCESSFUL;
+    ASSERT(!NT_SUCCESS(Status));
+    return Status;
 }
 
 __checkReturn
