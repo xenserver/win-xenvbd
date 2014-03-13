@@ -944,6 +944,7 @@ abort:
     Frontend->DiskInfo.DiscardGranularity = __ReadValue32(Frontend, "discard-granularity", 0, NULL);
 
     Verbose("Target[%d] : VBDFeatures %s%s%s (%s%x/%x)\n",
+                Frontend->TargetId,
                 Frontend->DiskInfo.Barrier ? "BARRIER " : "",
                 Frontend->DiskInfo.FlushCache ?  "FLUSH " : "",
                 Frontend->DiskInfo.Discard ? "DISCARD " : "",
