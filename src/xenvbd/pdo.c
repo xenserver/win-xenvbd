@@ -900,7 +900,7 @@ SGListNext(
 static FORCEINLINE BOOLEAN
 MapSegmentBuffer(
     IN  PXENVBD_PDO             Pdo,
-    IN  PXENVBD_SEGMENT         Segment,
+    IN  PXENVBD_CONTEXT         Context,
     IN  PXENVBD_SG_LIST         SGList,
     IN  ULONG                   SectorSize,
     IN  ULONG                   SectorsNow
@@ -911,7 +911,7 @@ MapSegmentBuffer(
     // map PhysAddr to 1 or 2 pages and lock for VirtAddr
 #pragma warning(push)
 #pragma warning(disable:28145)
-    Mdl = &Segment->Mdl;
+    Mdl = &Context->Mdl;
     Mdl->Next           = NULL;
     Mdl->Size           = (SHORT)(sizeof(MDL) + sizeof(PFN_NUMBER));
     Mdl->MdlFlags       = MDL_PAGES_LOCKED;
@@ -920,13 +920,13 @@ MapSegmentBuffer(
     Mdl->StartVa        = NULL;
     Mdl->ByteCount      = SGList->PhysLen;
     Mdl->ByteOffset     = __Offset(SGList->PhysAddr);
-    Segment->Pfn[0]     = __Pfn(SGList->PhysAddr);
+    Context->Pfn[0]     = __Pfn(SGList->PhysAddr);
 
     if (SGList->PhysLen < SectorsNow * SectorSize) {
         SGListGet(SGList);
         Mdl->Size       += sizeof(PFN_NUMBER);
         Mdl->ByteCount  = Mdl->ByteCount + SGList->PhysLen;
-        Segment->Pfn[1] = __Pfn(SGList->PhysAddr);
+        Context->Pfn[1] = __Pfn(SGList->PhysAddr);
     }
 #pragma warning(pop)
 
@@ -934,15 +934,15 @@ MapSegmentBuffer(
     ASSERT3U(Mdl->ByteCount, <=, PAGE_SIZE);
     ASSERT3U(SectorsNow, ==, (Mdl->ByteCount / SectorSize));
                 
-    Segment->Length = __min(Mdl->ByteCount, PAGE_SIZE);
-    Segment->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode, 
+    Context->Length = __min(Mdl->ByteCount, PAGE_SIZE);
+    Context->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode,
                             MmCached, NULL, FALSE, __PdoPriority(Pdo));
-    if (!Segment->Buffer) {
+    if (!Context->Buffer) {
         goto fail;
     }
 
-    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Segment->Pfn[0]);
-    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Segment->Pfn[1]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Context->Pfn[0]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Context->Pfn[1]);
  
     return TRUE;
 
@@ -952,12 +952,14 @@ fail:
 
 static FORCEINLINE VOID
 UnmapSegmentBuffer(
-    IN  PXENVBD_SEGMENT         Segment
+    IN  PXENVBD_CONTEXT         Context
     )
 {
-    MmUnmapLockedPages(Segment->Buffer, &Segment->Mdl);
-    RtlZeroMemory(&Segment->Mdl, sizeof(Segment->Mdl));
-    RtlZeroMemory(Segment->Pfn, sizeof(Segment->Pfn));
+    MmUnmapLockedPages(Context->Buffer, &Context->Mdl);
+    RtlZeroMemory(&Context->Mdl, sizeof(Context->Mdl));
+    RtlZeroMemory(Context->Pfn, sizeof(Context->Pfn));
+    Context->Buffer = NULL;
+    Context->Length = 0;
 }
 
 static FORCEINLINE PXENVBD_REQUEST
@@ -986,6 +988,7 @@ RequestPut(
     case BLKIF_OP_WRITE:
         for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
             PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
 
             // ungrant (if granted)
             if (Segment->GrantRef)
@@ -993,15 +996,13 @@ RequestPut(
             Segment->GrantRef = 0;
             
             // release buffer (if got)
-            if (Segment->BufferId)
-                BufferPut(Segment->BufferId);
-            Segment->BufferId = NULL;
+            if (Context->BufferId)
+                BufferPut(Context->BufferId);
+            Context->BufferId = NULL;
             
             // unmap buffer (if mapped)
-            if (Segment->Buffer)
-                UnmapSegmentBuffer(Segment);
-            Segment->Buffer = NULL;
-            Segment->Length = 0;
+            if (Context->Buffer)
+                UnmapSegmentBuffer(Context);
         }
         break;
 
@@ -1026,10 +1027,10 @@ RequestCopyOutput(
         ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
 
         for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
 
-            if (Segment->BufferId)
-                BufferCopyOut(Segment->BufferId, Segment->Buffer, Segment->Length);
+            if (Context->BufferId)
+                BufferCopyOut(Context->BufferId, Context->Buffer, Context->Length);
         }
         break;
 
@@ -1096,6 +1097,7 @@ PrepareReadWrite(
         Request->u.ReadWrite.FirstSector = StartSector + SectorsDone;
         for (Index = 0; Index < BLKIF_MAX_SEGMENTS_PER_REQUEST && SectorsDone != NumSectors; ++Index) {
             PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
             PFN_NUMBER      Pfn;
             ULONG           SectorsNow;
 
@@ -1107,9 +1109,9 @@ PrepareReadWrite(
                 Segment->FirstSector    = (UCHAR)((__Offset(SGList.PhysAddr) + SectorSize - 1) / SectorSize);
                 SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage - Segment->FirstSector);
                 Segment->LastSector     = (UCHAR)(Segment->FirstSector + SectorsNow - 1);
-                Segment->BufferId       = NULL; // granted, ensure its null
-                Segment->Buffer         = NULL; // granted, ensure its null
-                Segment->Length         = 0;    // granted, ensure its 0
+                Context->BufferId       = NULL; // granted, ensure its null
+                Context->Buffer         = NULL; // granted, ensure its null
+                Context->Length         = 0;    // granted, ensure its 0
                 Pfn                     = __Pfn(SGList.PhysAddr);
 
                 ASSERT3U((SGList.PhysLen / SectorSize), ==, SectorsNow);
@@ -1129,20 +1131,20 @@ PrepareReadWrite(
                 }
 
                 // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
-                if (!MapSegmentBuffer(Pdo, Segment, &SGList, SectorSize, SectorsNow)) {
+                if (!MapSegmentBuffer(Pdo, Context, &SGList, SectorSize, SectorsNow)) {
                     ++Pdo->FailedMaps;
                     goto fail;
                 }
 
                 // get a buffer
-                if (!BufferGet(Srb, &Segment->BufferId, &Pfn)) {
+                if (!BufferGet(Srb, &Context->BufferId, &Pfn)) {
                     ++Pdo->FailedBounces;
                     goto fail;
                 }
 
                 // copy contents in
                 if (Operation == BLKIF_OP_WRITE) {
-                    BufferCopyIn(Segment->BufferId, Segment->Buffer, Segment->Length);
+                    BufferCopyIn(Context->BufferId, Context->Buffer, Context->Length);
                 }
             }
 

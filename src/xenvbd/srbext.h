@@ -38,23 +38,29 @@
 #include "assert.h"
 
 // Segments - extension of blkif_segment_t
+#pragma pack(push, 1)
 typedef struct _XENVBD_SEGMENT {
     ULONG               GrantRef;
     UCHAR               FirstSector;
     UCHAR               LastSector;
+    USHORT              __Padding;
+} XENVBD_SEGMENT, *PXENVBD_SEGMENT;
+#pragma pack(pop)
 
+typedef struct _XENVBD_CONTEXT {
     PVOID               BufferId;
     PVOID               Buffer; // VirtAddr mapped to PhysAddr(s)
     ULONG               Length;
     MDL                 Mdl;
     PFN_NUMBER          Pfn[2];
-} XENVBD_SEGMENT, *PXENVBD_SEGMENT;
+} XENVBD_CONTEXT, *PXENVBD_CONTEXT;
 
 // Request - extension of blkif_request_t
 typedef struct _XENVBD_REQUEST_READWRITE {
     UCHAR               NrSegments;
     ULONG64             FirstSector;
     XENVBD_SEGMENT      Segments[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    XENVBD_CONTEXT      Contexts[BLKIF_MAX_SEGMENTS_PER_REQUEST];
 } XENVBD_REQUEST_READWRITE, *PXENVBD_REQUEST_READWRITE;
 
 typedef struct _XENVBD_REQUEST_BARRIER {
