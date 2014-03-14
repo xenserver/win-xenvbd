@@ -1455,7 +1455,7 @@ FrontendDebugCallback(
             __XenvbdStateName(Frontend->State));
 
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: Caps %s%s%s%s%s%s\n",
+            "FRONTEND: Caps    : %s%s%s%s%s%s\n",
             Frontend->Caps.Connected ? "CONNECTED " : "",
             Frontend->Caps.Removable ? "REMOVABLE " : "",
             Frontend->Caps.SurpriseRemovable ? "SURPRISE " : "",
@@ -1464,7 +1464,7 @@ FrontendDebugCallback(
             Frontend->Caps.DumpFile ? "DUMP " : "");
 
     DEBUG(Printf, Debug, Callback,
-        "FRONTEND: Features (Indirect:%u) %s%s%s%s%s (%s%x/%x)\n",
+        "FRONTEND: Features: (Indirect:%u) %s%s%s%s(%s%x/%x)\n",
             Frontend->Features.Indirect,
             Frontend->Features.Persistent ? "PERSISTENT " : "",
             Frontend->DiskInfo.Barrier ? "BARRIER " : "",
@@ -1475,7 +1475,7 @@ FrontendDebugCallback(
             Frontend->DiskInfo.DiscardGranularity);
 
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: DiskInfo %llu @ %u (%u) %08x\n",
+            "FRONTEND: DiskInfo: %llu @ %u (%u) %08x\n",
             Frontend->DiskInfo.SectorCount,
             Frontend->DiskInfo.SectorSize,
             Frontend->DiskInfo.PhysSectorSize,
