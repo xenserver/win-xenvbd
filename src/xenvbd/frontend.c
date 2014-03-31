@@ -800,11 +800,20 @@ FrontendPrepare(
     Frontend->Features.Indirect     =  __ReadValue32(Frontend, "feature-max-indirect-segments", 0, NULL);
     Frontend->Features.Persistent   = (__ReadValue32(Frontend, "feature-persistent", 0, NULL) == 1);
 
-    Verbose("Target[%d] : BackendId=%u Indirect=%u %s%s\n",
-                Frontend->TargetId, Frontend->BackendId, 
-                Frontend->Features.Indirect,
+    Verbose("Target[%d] : BackendId %d (%s)\n",
+                Frontend->TargetId,
+                Frontend->BackendId,
+                Frontend->BackendPath);
+    Verbose("Target[%d] : RingFeatures %s%s%s\n",
+                Frontend->TargetId,
                 Frontend->Features.Persistent ? "PERSISTENT " : "",
+                Frontend->Features.Indirect ? "INDIRECT " : "",
                 Frontend->Caps.Removable ? "REMOVABLE" : "");
+    if (Frontend->Features.Indirect) {
+        Verbose("Target[%d] : INDIRECT %x\n",
+                    Frontend->TargetId,
+                    Frontend->Features.Indirect);
+    }
     
     return STATUS_SUCCESS;
 
@@ -943,14 +952,18 @@ abort:
     Frontend->DiskInfo.DiscardAlignment = __ReadValue32(Frontend, "discard-alignment", 0, NULL);
     Frontend->DiskInfo.DiscardGranularity = __ReadValue32(Frontend, "discard-granularity", 0, NULL);
 
-    Verbose("Target[%d] : VBDFeatures %s%s%s (%s%x/%x)\n",
+    Verbose("Target[%d] : VBDFeatures %s%s%s\n",
                 Frontend->TargetId,
                 Frontend->DiskInfo.Barrier ? "BARRIER " : "",
                 Frontend->DiskInfo.FlushCache ?  "FLUSH " : "",
-                Frontend->DiskInfo.Discard ? "DISCARD " : "",
-                Frontend->DiskInfo.DiscardSecure ? "SECURE " : "",
-                Frontend->DiskInfo.DiscardAlignment,
-                Frontend->DiskInfo.DiscardGranularity);
+                Frontend->DiskInfo.Discard ? "DISCARD " : "");
+    if (Frontend->DiskInfo.Discard) {
+        Verbose("Target[%d] : DISCARD %s%x/%x\n",
+                    Frontend->TargetId,
+                    Frontend->DiskInfo.DiscardSecure ? "SECURE " : "",
+                    Frontend->DiskInfo.DiscardAlignment,
+                    Frontend->DiskInfo.DiscardGranularity);
+    }
 
     return STATUS_SUCCESS;
 
@@ -1433,25 +1446,21 @@ FrontendDebugCallback(
     )
 {
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: TargetId            : %d\n", 
-            Frontend->TargetId);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: DeviceId            : %d\n", 
-            Frontend->DeviceId);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: FrontendPath        : %s\n", 
-            Frontend->FrontendPath);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: BackendPath         : %s\n", 
-            Frontend->BackendPath ? Frontend->BackendPath : "NULL");
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: TargetPath          : %s\n", 
-            Frontend->TargetPath);
-    DEBUG(Printf, Debug, Callback,
-            "FRONTEND: BackendId           : %d\n", 
+            "FRONTEND: TargetId=%d DeviceId=%d BackendId=%d\n",
+            Frontend->TargetId,
+            Frontend->DeviceId,
             Frontend->BackendId);
     DEBUG(Printf, Debug, Callback,
-            "FRONTEND: State               : %s\n",
+            "FRONTEND: FrontendPath %s\n",
+            Frontend->FrontendPath);
+    DEBUG(Printf, Debug, Callback,
+            "FRONTEND: BackendPath  %s\n",
+            Frontend->BackendPath ? Frontend->BackendPath : "NULL");
+    DEBUG(Printf, Debug, Callback,
+            "FRONTEND: TargetPath   %s\n",
+            Frontend->TargetPath);
+    DEBUG(Printf, Debug, Callback,
+            "FRONTEND: State   : %s\n",
             __XenvbdStateName(Frontend->State));
 
     DEBUG(Printf, Debug, Callback,
@@ -1464,15 +1473,25 @@ FrontendDebugCallback(
             Frontend->Caps.DumpFile ? "DUMP " : "");
 
     DEBUG(Printf, Debug, Callback,
-        "FRONTEND: Features: (Indirect:%u) %s%s%s%s(%s%x/%x)\n",
-            Frontend->Features.Indirect,
+            "FRONTEND: Features: %s%s%s%s%s\n",
             Frontend->Features.Persistent ? "PERSISTENT " : "",
+            Frontend->Features.Indirect > 0 ? "INDIRECT " : "",
             Frontend->DiskInfo.Barrier ? "BARRIER " : "",
             Frontend->DiskInfo.FlushCache ? "FLUSH " : "",
-            Frontend->DiskInfo.Discard ? "DISCARD " : "",
-            Frontend->DiskInfo.DiscardSecure ? "SECURE " : "",
-            Frontend->DiskInfo.DiscardAlignment,
-            Frontend->DiskInfo.DiscardGranularity);
+            Frontend->DiskInfo.Discard ? "DISCARD " : "");
+
+    if (Frontend->Features.Indirect > 0) {
+        DEBUG(Printf, Debug, Callback,
+                "FRONTEND: INDIRECT %x\n",
+                Frontend->Features.Indirect);
+    }
+    if (Frontend->DiskInfo.Discard) {
+        DEBUG(Printf, Debug, Callback,
+                "FRONTEND: DISCARD %s%x/%x\n",
+                Frontend->DiskInfo.DiscardSecure ? "SECURE " : "",
+                Frontend->DiskInfo.DiscardAlignment,
+                Frontend->DiskInfo.DiscardGranularity);
+    }
 
     DEBUG(Printf, Debug, Callback,
             "FRONTEND: DiskInfo: %llu @ %u (%u) %08x\n",

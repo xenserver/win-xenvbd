@@ -204,35 +204,26 @@ PdoDebugCallback(
 {
     if (Pdo == NULL || DebugInterface == NULL || DebugCallback == NULL)
         return;
-
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Signature              : %08x\n", 
-          Pdo->Signature);
-
     if (Pdo->Signature != PDO_SIGNATURE)
         return;
 
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Fdo                    : 0x%p\n", 
-          Pdo->Fdo);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: DeviceObject           : 0x%p\n", 
+          "PDO: Fdo 0x%p DeviceObject 0x%p\n",
+          Pdo->Fdo,
           Pdo->DeviceObject);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: ReferenceCount         : %d\n", 
+          "PDO: ReferenceCount %d\n",
           Pdo->ReferenceCount);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: DevicePnpState         : %s (%s)\n",
+          "PDO: DevicePnpState %s (%s)\n",
           __PnpStateName(Pdo->DevicePnpState),
           __PnpStateName(Pdo->PrevPnpState));
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: DevicePowerState       : %s\n",
+          "PDO: DevicePowerState %s\n",
           PowerDeviceStateName(Pdo->DevicePowerState));
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: EmulatedUnplugged      : %s\n", 
-          Pdo->EmulatedUnplugged ? "TRUE" : "FALSE");
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Missing                : %s\n",
+          "PDO: %s %s\n",
+          Pdo->EmulatedUnplugged ? "PV" : "EMULATED",
           Pdo->Missing ? Pdo->Reason : "Not Missing");
 
     DEBUG(Printf, DebugInterface, DebugCallback,
@@ -255,17 +246,17 @@ PdoDebugCallback(
     __LookasideDebug(&Pdo->SegmentList, DebugInterface, DebugCallback, "SEGMENTs");
     __LookasideDebug(&Pdo->ContextList, DebugInterface, DebugCallback, "CONTEXTs");
 
+    FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->FreshSrbs,    "Fresh    ", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->PreparedReqs, "Prepared ", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown ", DebugInterface, DebugCallback);
+
     Pdo->BlkOpRead = Pdo->BlkOpWrite = 0;
     Pdo->BlkOpIndirectRead = Pdo->BlkOpIndirectWrite = 0;
     Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
     Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
     Pdo->SegsGranted = Pdo->SegsBounced = 0;
-
-    FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->FreshSrbs, "Fresh", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->PreparedReqs, "Prepared", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown", DebugInterface, DebugCallback);
 }
 
 //=============================================================================

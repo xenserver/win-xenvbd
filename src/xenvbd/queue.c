@@ -132,7 +132,7 @@ QueueDebugCallback(
     )
 {
     DEBUG(Printf, Debug, Callback,
-            "QUEUE: %10s : %u / %u\n",
+            "QUEUE: %s : %u / %u\n",
             Name, Queue->Current, Queue->Maximum);
 
     Queue->Maximum = Queue->Current;

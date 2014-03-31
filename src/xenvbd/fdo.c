@@ -355,38 +355,27 @@ FdoDebugCallback(
         return;
 
     DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: Crashing             : %s\n",
-          Crashing ? "TRUE" : "FALSE");
-    DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: Version              : %d.%d.%d.%d (%d/%d/%d)\n",
+          "FDO: Version: %d.%d.%d.%d (%d/%d/%d)\n",
           MAJOR_VERSION, MINOR_VERSION, MICRO_VERSION, BUILD_NUMBER,
           DAY, MONTH, YEAR); 
-    DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback, 
-          "FDO: Signature            : %08x\n",
-          Fdo->Signature);
     DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: Fdo                  : 0x%p\n",
-          Context);
+          "FDO: Fdo: 0x%p (ref-count %d) %s\n",
+          Context,
+          Fdo->ReferenceCount,
+          Crashing ? "CRASHING" : "");
     DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: ReferenceCount       : %d\n",
-          Fdo->ReferenceCount);
-    DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: DeviceObject         : 0x%p\n",
-          Fdo->DeviceObject);       
-    DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: LowerDeviceObject    : 0x%p\n", 
-          Fdo->LowerDeviceObject);
-    DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: PhysicalDeviceObject : 0x%p\n", 
+          "FDO: DevObj 0x%p LowerDevObj 0x%p PhysDevObj 0x%p\n",
+          Fdo->DeviceObject,
+          Fdo->LowerDeviceObject,
           Fdo->PhysicalDeviceObject);
     DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: DevicePowerState     : %s\n", 
+          "FDO: DevicePowerState: %s\n",
           PowerDeviceStateName(Fdo->DevicePower));
     DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: Enumerator           : %s (0x%p)\n", 
+          "FDO: Enumerator      : %s (0x%p)\n",
           FdoEnum(Fdo), Fdo->Enumerator.Buffer);
     DEBUG(Printf, Fdo->Debug, Fdo->DebugCallback,
-          "FDO: Srbs                 : %d Cur / %d Max / %d Tot\n", 
+          "FDO: Srbs            : %d / %d (%d Total)\n",
           Fdo->CurrentSrbs, Fdo->MaximumSrbs, Fdo->TotalSrbs);
 
     BufferDebugCallback(Fdo->Debug, Fdo->DebugCallback);
