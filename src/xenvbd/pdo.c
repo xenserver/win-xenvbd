@@ -99,7 +99,7 @@ struct _XENVBD_PDO {
 
     // SRBs
     XENVBD_LOOKASIDE            SegmentList;
-    XENVBD_LOOKASIDE            ContextList;
+    XENVBD_LOOKASIDE            MappingList;
     XENVBD_LOOKASIDE            RequestList;
     XENVBD_QUEUE                FreshSrbs;
     XENVBD_QUEUE                PreparedReqs;
@@ -126,10 +126,10 @@ struct _XENVBD_PDO {
 #define PDO_POOL_TAG            'odPX'
 #define REQUEST_POOL_TAG        'qeRX'
 #define SEGMENT_POOL_TAG        'geSX'
-#define CONTEXT_POOL_TAG        'xtCX'
+#define MAPPING_POOL_TAG        'paMX'
 #define SEGMENTS_PER_PAGE       (PAGE_SIZE / sizeof(XENVBD_SEGMENT))
 #define SEGMENT_LIST_SIZE       (SEGMENTS_PER_PAGE * sizeof(XENVBD_SEGMENT))
-#define CONTEXT_LIST_SIZE       (SEGMENTS_PER_PAGE * sizeof(XENVBD_CONTEXT))
+#define MAPPING_LIST_SIZE       (SEGMENTS_PER_PAGE * sizeof(XENVBD_MAPPING))
 
 __checkReturn
 __drv_allocatesMem(mem)
@@ -244,7 +244,7 @@ PdoDebugCallback(
 
     __LookasideDebug(&Pdo->RequestList, DebugInterface, DebugCallback, "REQUESTs");
     __LookasideDebug(&Pdo->SegmentList, DebugInterface, DebugCallback, "SEGMENTs");
-    __LookasideDebug(&Pdo->ContextList, DebugInterface, DebugCallback, "CONTEXTs");
+    __LookasideDebug(&Pdo->MappingList, DebugInterface, DebugCallback, "MAPPINGs");
 
     FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->FreshSrbs,    "Fresh    ", DebugInterface, DebugCallback);
@@ -526,7 +526,7 @@ PdoCreate(
 
     __LookasideInit(&Pdo->RequestList, sizeof(XENVBD_REQUEST), REQUEST_POOL_TAG);
     __LookasideInit(&Pdo->SegmentList, SEGMENT_LIST_SIZE, SEGMENT_POOL_TAG);
-    __LookasideInit(&Pdo->ContextList, CONTEXT_LIST_SIZE, CONTEXT_POOL_TAG);
+    __LookasideInit(&Pdo->MappingList, MAPPING_LIST_SIZE, MAPPING_POOL_TAG);
 
     Status = PdoD3ToD0(Pdo);
     if (!NT_SUCCESS(Status))
@@ -545,7 +545,7 @@ fail4:
 
 fail3:
     Error("Fail3\n");
-    __LookasideTerm(&Pdo->ContextList);
+    __LookasideTerm(&Pdo->MappingList);
     __LookasideTerm(&Pdo->SegmentList);
     __LookasideTerm(&Pdo->RequestList);
     FrontendDestroy(Pdo->Frontend);
@@ -584,12 +584,12 @@ PdoDestroy(
     Objects[0] = &Pdo->RemoveEvent;
     Objects[1] = &Pdo->RequestList.Empty;
     Objects[2] = &Pdo->SegmentList.Empty;
-    Objects[3] = &Pdo->ContextList.Empty;
+    Objects[3] = &Pdo->MappingList.Empty;
     KeWaitForMultipleObjects(4, Objects, WaitAll, Executive, KernelMode, FALSE, NULL, NULL);
     ASSERT3S(Pdo->ReferenceCount, ==, 0);
     ASSERT3U(PdoGetDevicePnpState(Pdo), ==, Deleted);
 
-    __LookasideTerm(&Pdo->ContextList);
+    __LookasideTerm(&Pdo->MappingList);
     __LookasideTerm(&Pdo->SegmentList);
     __LookasideTerm(&Pdo->RequestList);
 
@@ -934,7 +934,7 @@ SGListNext(
 static FORCEINLINE BOOLEAN
 MapSegmentBuffer(
     IN  PXENVBD_PDO             Pdo,
-    IN  PXENVBD_CONTEXT         Context,
+    IN  PXENVBD_MAPPING         Mapping,
     IN  PXENVBD_SG_LIST         SGList,
     IN  ULONG                   SectorSize,
     IN  ULONG                   SectorsNow
@@ -945,7 +945,7 @@ MapSegmentBuffer(
     // map PhysAddr to 1 or 2 pages and lock for VirtAddr
 #pragma warning(push)
 #pragma warning(disable:28145)
-    Mdl = &Context->Mdl;
+    Mdl = &Mapping->Mdl;
     Mdl->Next           = NULL;
     Mdl->Size           = (SHORT)(sizeof(MDL) + sizeof(PFN_NUMBER));
     Mdl->MdlFlags       = MDL_PAGES_LOCKED;
@@ -954,13 +954,13 @@ MapSegmentBuffer(
     Mdl->StartVa        = NULL;
     Mdl->ByteCount      = SGList->PhysLen;
     Mdl->ByteOffset     = __Offset(SGList->PhysAddr);
-    Context->Pfn[0]     = __Phys2Pfn(SGList->PhysAddr);
+    Mapping->Pfn[0]     = __Phys2Pfn(SGList->PhysAddr);
 
     if (SGList->PhysLen < SectorsNow * SectorSize) {
         SGListGet(SGList);
         Mdl->Size       += sizeof(PFN_NUMBER);
         Mdl->ByteCount  = Mdl->ByteCount + SGList->PhysLen;
-        Context->Pfn[1] = __Phys2Pfn(SGList->PhysAddr);
+        Mapping->Pfn[1] = __Phys2Pfn(SGList->PhysAddr);
     }
 #pragma warning(pop)
 
@@ -968,15 +968,15 @@ MapSegmentBuffer(
     ASSERT3U(Mdl->ByteCount, <=, PAGE_SIZE);
     ASSERT3U(SectorsNow, ==, (Mdl->ByteCount / SectorSize));
                 
-    Context->Length = __min(Mdl->ByteCount, PAGE_SIZE);
-    Context->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode,
+    Mapping->Length = __min(Mdl->ByteCount, PAGE_SIZE);
+    Mapping->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode,
                             MmCached, NULL, FALSE, __PdoPriority(Pdo));
-    if (!Context->Buffer) {
+    if (!Mapping->Buffer) {
         goto fail;
     }
 
-    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Context->Pfn[0]);
-    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Context->Pfn[1]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Mapping->Pfn[0]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Mapping->Pfn[1]);
  
     return TRUE;
 
@@ -986,14 +986,14 @@ fail:
 
 static FORCEINLINE VOID
 UnmapSegmentBuffer(
-    IN  PXENVBD_CONTEXT         Context
+    IN  PXENVBD_MAPPING         Mapping
     )
 {
-    MmUnmapLockedPages(Context->Buffer, &Context->Mdl);
-    RtlZeroMemory(&Context->Mdl, sizeof(Context->Mdl));
-    RtlZeroMemory(Context->Pfn, sizeof(Context->Pfn));
-    Context->Buffer = NULL;
-    Context->Length = 0;
+    MmUnmapLockedPages(Mapping->Buffer, &Mapping->Mdl);
+    RtlZeroMemory(&Mapping->Mdl, sizeof(Mapping->Mdl));
+    RtlZeroMemory(Mapping->Pfn, sizeof(Mapping->Pfn));
+    Mapping->Buffer = NULL;
+    Mapping->Length = 0;
 }
 
 static FORCEINLINE VOID
@@ -1016,12 +1016,12 @@ RequestCleanup(
             Segment->GrantRef = 0;
         }
         for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
-            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
-            if (Context->BufferId)
-                BufferPut(Context->BufferId);
-            Context->BufferId = NULL;
-            if (Context->Buffer)
-                UnmapSegmentBuffer(Context);
+            PXENVBD_MAPPING Mapping = &Request->u.ReadWrite.Mappings[Index];
+            if (Mapping->BufferId)
+                BufferPut(Mapping->BufferId);
+            Mapping->BufferId = NULL;
+            if (Mapping->Buffer)
+                UnmapSegmentBuffer(Mapping);
         }
         break;
 
@@ -1045,19 +1045,19 @@ RequestCleanup(
             Request->u.Indirect.Segments[Index] = NULL;
         }
         for (Index = 0; Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST; ++Index) {
-            PXENVBD_CONTEXT ContextList = Request->u.Indirect.Contexts[Index];
-            if (ContextList == NULL)
+            PXENVBD_MAPPING MappingList = Request->u.Indirect.Mappings[Index];
+            if (MappingList == NULL)
                 continue;
             for (Index2 = 0; Index2 < SEGMENTS_PER_PAGE; ++Index2) {
-                PXENVBD_CONTEXT Context = &ContextList[Index2];
-                if (Context->BufferId)
-                    BufferPut(Context->BufferId);
-                Context->BufferId = NULL;
-                if (Context->Buffer)
-                    UnmapSegmentBuffer(Context);
+                PXENVBD_MAPPING Mapping = &MappingList[Index2];
+                if (Mapping->BufferId)
+                    BufferPut(Mapping->BufferId);
+                Mapping->BufferId = NULL;
+                if (Mapping->Buffer)
+                    UnmapSegmentBuffer(Mapping);
             }
-            __LookasideFree(&Pdo->ContextList, ContextList);
-            Request->u.Indirect.Contexts[Index] = NULL;
+            __LookasideFree(&Pdo->MappingList, MappingList);
+            Request->u.Indirect.Mappings[Index] = NULL;
         }
         break;
 
@@ -1082,10 +1082,10 @@ RequestCopyOutput(
                     Index < BLKIF_MAX_SEGMENTS_PER_REQUEST &&
                     NrSegments > 0;
                             ++Index, --NrSegments) {
-            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
+            PXENVBD_MAPPING Mapping = &Request->u.ReadWrite.Mappings[Index];
 
-            if (Context->BufferId)
-                BufferCopyOut(Context->BufferId, Context->Buffer, Context->Length);
+            if (Mapping->BufferId)
+                BufferCopyOut(Mapping->BufferId, Mapping->Buffer, Mapping->Length);
         }
         break;
 
@@ -1098,17 +1098,17 @@ RequestCopyOutput(
                     Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST &&
                     NrSegments > 0;
                             ++Index) {
-            PXENVBD_CONTEXT ContextList = Request->u.Indirect.Contexts[Index];
-            if (ContextList == NULL)
+            PXENVBD_MAPPING MappingList = Request->u.Indirect.Mappings[Index];
+            if (MappingList == NULL)
                 continue;
             for (Index2 = 0;
                         Index2 < SEGMENTS_PER_PAGE &&
                         NrSegments > 0;
                                 ++Index2, --NrSegments) {
-                PXENVBD_CONTEXT Context = &ContextList[Index2];
+                PXENVBD_MAPPING Mapping = &MappingList[Index2];
 
-                if (Context->BufferId)
-                    BufferCopyOut(Context->BufferId, Context->Buffer, Context->Length);
+                if (Mapping->BufferId)
+                    BufferCopyOut(Mapping->BufferId, Mapping->Buffer, Mapping->Length);
             }
         }
         break;
@@ -1123,7 +1123,7 @@ static NTSTATUS
 PrepareSegment(
     IN  PXENVBD_PDO             Pdo,
     IN  PXENVBD_SEGMENT         Segment,
-    IN  PXENVBD_CONTEXT         Context,
+    IN  PXENVBD_MAPPING         Mapping,
     IN  PXENVBD_SG_LIST         SGList,
     IN  BOOLEAN                 ReadOnly,
     IN  ULONG                   SectorsLeft,
@@ -1142,9 +1142,9 @@ PrepareSegment(
         Segment->FirstSector    = (UCHAR)((__Offset(SGList->PhysAddr) + SectorSize - 1) / SectorSize);
         *SectorsNow             = __min(SectorsLeft, SectorsPerPage - Segment->FirstSector);
         Segment->LastSector     = (UCHAR)(Segment->FirstSector + *SectorsNow - 1);
-        Context->BufferId       = NULL; // granted, ensure its null
-        Context->Buffer         = NULL; // granted, ensure its null
-        Context->Length         = 0;    // granted, ensure its 0
+        Mapping->BufferId       = NULL; // granted, ensure its null
+        Mapping->Buffer         = NULL; // granted, ensure its null
+        Mapping->Length         = 0;    // granted, ensure its 0
         Pfn                     = __Phys2Pfn(SGList->PhysAddr);
 
         ASSERT3U((SGList->PhysLen / SectorSize), ==, *SectorsNow);
@@ -1157,20 +1157,20 @@ PrepareSegment(
         Segment->LastSector     = (UCHAR)(*SectorsNow - 1);
 
         // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
-        if (!MapSegmentBuffer(Pdo, Context, SGList, SectorSize, *SectorsNow)) {
+        if (!MapSegmentBuffer(Pdo, Mapping, SGList, SectorSize, *SectorsNow)) {
             ++Pdo->FailedMaps;
             goto fail;
         }
 
         // get a buffer
-        if (!BufferGet(Segment, &Context->BufferId, &Pfn)) {
+        if (!BufferGet(Segment, &Mapping->BufferId, &Pfn)) {
             ++Pdo->FailedBounces;
             goto fail;
         }
 
         // copy contents in
         if (ReadOnly) { // Operation == BLKIF_OP_WRITE
-            BufferCopyIn(Context->BufferId, Context->Buffer, Context->Length);
+            BufferCopyIn(Mapping->BufferId, Mapping->Buffer, Mapping->Length);
         }
     }
 
@@ -1212,13 +1212,13 @@ PrepareBlkifReadWrite(
                 SectorsLeft > 0;
                         ++Index) {
         PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-        PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
+        PXENVBD_MAPPING Mapping = &Request->u.ReadWrite.Mappings[Index];
         ULONG           SectorsNow;
 
         Request->u.ReadWrite.NrSegments++;
         Status = PrepareSegment(Pdo,
                                 Segment,
-                                Context,
+                                Mapping,
                                 SGList,
                                 ReadOnly,
                                 SectorsLeft,
@@ -1267,7 +1267,7 @@ PrepareBlkifIndirect(
                 Request->u.Indirect.NrSegments < MaxSegments;
                         ++Index) {
         PXENVBD_SEGMENT SegmentList;
-        PXENVBD_CONTEXT ContextList;
+        PXENVBD_MAPPING MappingList;
 
         Status = STATUS_NO_MEMORY;
         Request->u.Indirect.Segments[Index] = SegmentList = __LookasideAlloc(&Pdo->SegmentList);
@@ -1275,8 +1275,8 @@ PrepareBlkifIndirect(
             goto fail;
 
         Status = STATUS_NO_MEMORY;
-        Request->u.Indirect.Contexts[Index] = ContextList = __LookasideAlloc(&Pdo->ContextList);
-        if (ContextList == NULL)
+        Request->u.Indirect.Mappings[Index] = MappingList = __LookasideAlloc(&Pdo->MappingList);
+        if (MappingList == NULL)
             goto fail;
 
         for (Index2 = 0;
@@ -1285,13 +1285,13 @@ PrepareBlkifIndirect(
                     Request->u.Indirect.NrSegments < MaxSegments;
                             ++Index2) {
             PXENVBD_SEGMENT Segment = &SegmentList[Index2];
-            PXENVBD_CONTEXT Context = &ContextList[Index2];
+            PXENVBD_MAPPING Mapping = &MappingList[Index2];
             ULONG           SectorsNow = 0;
 
             Request->u.Indirect.NrSegments++;
             Status = PrepareSegment(Pdo,
                                     Segment,
-                                    Context,
+                                    Mapping,
                                     SGList,
                                     ReadOnly,
                                     SectorsLeft,

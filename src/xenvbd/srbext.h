@@ -47,20 +47,20 @@ typedef struct _XENVBD_SEGMENT {
 } XENVBD_SEGMENT, *PXENVBD_SEGMENT;
 #pragma pack(pop)
 
-typedef struct _XENVBD_CONTEXT {
+typedef struct _XENVBD_MAPPING {
     PVOID               BufferId;
     PVOID               Buffer; // VirtAddr mapped to PhysAddr(s)
     ULONG               Length;
     MDL                 Mdl;
     PFN_NUMBER          Pfn[2];
-} XENVBD_CONTEXT, *PXENVBD_CONTEXT;
+} XENVBD_MAPPING, *PXENVBD_MAPPING;
 
 // Request - extension of blkif_request_t
 typedef struct _XENVBD_REQUEST_READWRITE {
     UCHAR               NrSegments;
     ULONG64             FirstSector;
     XENVBD_SEGMENT      Segments[BLKIF_MAX_SEGMENTS_PER_REQUEST];
-    XENVBD_CONTEXT      Contexts[BLKIF_MAX_SEGMENTS_PER_REQUEST];
+    XENVBD_MAPPING      Mappings[BLKIF_MAX_SEGMENTS_PER_REQUEST];
 } XENVBD_REQUEST_READWRITE, *PXENVBD_REQUEST_READWRITE;
 
 typedef struct _XENVBD_REQUEST_BARRIER {
@@ -79,7 +79,7 @@ typedef struct _XENVBD_REQUEST_INDIRECT {
     ULONG64             FirstSector;
     ULONG               Grants[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
     PXENVBD_SEGMENT     Segments[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
-    PXENVBD_CONTEXT     Contexts[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
+    PXENVBD_MAPPING     Mappings[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
 } XENVBD_REQUEST_INDIRECT, *PXENVBD_REQUEST_INDIRECT;
 
 typedef struct _XENVBD_REQUEST {
