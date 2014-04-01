@@ -54,15 +54,21 @@ typedef struct _XENVBD_CAPS {
 } XENVBD_CAPS, *PXENVBD_CAPS;
 
 typedef struct _XENVBD_FEATURES {
-    BOOLEAN                     Barrier;
-    BOOLEAN                     Discard;
-    BOOLEAN                     FlushCache;
+    ULONG                       Indirect;
+    BOOLEAN                     Persistent;
 } XENVBD_FEATURES, *PXENVBD_FEATURES;
 
 typedef struct _XENVBD_DISKINFO {
     ULONG64                     SectorCount;
     ULONG                       SectorSize;
+    ULONG                       PhysSectorSize;
     ULONG                       DiskInfo;
+    BOOLEAN                     Barrier;
+    BOOLEAN                     FlushCache;
+    BOOLEAN                     Discard;
+    BOOLEAN                     DiscardSecure;
+    ULONG                       DiscardAlignment;
+    ULONG                       DiscardGranularity;
 } XENVBD_DISKINFO, *PXENVBD_DISKINFO;
 
 typedef struct _XENVBD_FRONTEND XENVBD_FRONTEND, *PXENVBD_FRONTEND;

@@ -65,6 +65,9 @@ typedef struct _XENVBD_SG_LIST {
 typedef struct _XENVBD_LOOKASIDE {
     KEVENT                      Empty;
     LONG                        Used;
+    LONG                        Max;
+    ULONG                       Failed;
+    ULONG                       Size;
     NPAGED_LOOKASIDE_LIST       List;
 } XENVBD_LOOKASIDE, *PXENVBD_LOOKASIDE;
 
@@ -95,6 +98,8 @@ struct _XENVBD_PDO {
     const CHAR*                 Reason;
 
     // SRBs
+    XENVBD_LOOKASIDE            SegmentList;
+    XENVBD_LOOKASIDE            ContextList;
     XENVBD_LOOKASIDE            RequestList;
     XENVBD_QUEUE                FreshSrbs;
     XENVBD_QUEUE                PreparedReqs;
@@ -104,10 +109,11 @@ struct _XENVBD_PDO {
     // Stats - SRB Counts by BLKIF_OP_
     ULONG                       BlkOpRead;
     ULONG                       BlkOpWrite;
+    ULONG                       BlkOpIndirectRead;
+    ULONG                       BlkOpIndirectWrite;
     ULONG                       BlkOpBarrier;
     ULONG                       BlkOpDiscard;
     // Stats - Failures
-    ULONG                       FailedAllocs;
     ULONG                       FailedMaps;
     ULONG                       FailedBounces;
     ULONG                       FailedGrants;
@@ -119,6 +125,11 @@ struct _XENVBD_PDO {
 //=============================================================================
 #define PDO_POOL_TAG            'odPX'
 #define REQUEST_POOL_TAG        'qeRX'
+#define SEGMENT_POOL_TAG        'geSX'
+#define CONTEXT_POOL_TAG        'xtCX'
+#define SEGMENTS_PER_PAGE       (PAGE_SIZE / sizeof(XENVBD_SEGMENT))
+#define SEGMENT_LIST_SIZE       (SEGMENTS_PER_PAGE * sizeof(XENVBD_SEGMENT))
+#define CONTEXT_LIST_SIZE       (SEGMENTS_PER_PAGE * sizeof(XENVBD_CONTEXT))
 
 __checkReturn
 __drv_allocatesMem(mem)
@@ -167,6 +178,23 @@ __PnpStateName(
     }
 }
 
+static FORCEINLINE VOID
+__LookasideDebug(
+    IN  PXENVBD_LOOKASIDE           Lookaside,
+    IN  PXENBUS_DEBUG_INTERFACE     Debug,
+    IN  PXENBUS_DEBUG_CALLBACK      Callback,
+    IN  PCHAR                       Name
+    )
+{
+    DEBUG(Printf, Debug, Callback,
+          "PDO: %s: %u / %u (%u failed)\n",
+          Name, Lookaside->Used,
+          Lookaside->Max, Lookaside->Failed);
+
+    Lookaside->Max = Lookaside->Used;
+    Lookaside->Failed = 0;
+}
+
 DECLSPEC_NOINLINE VOID
 PdoDebugCallback(
     __in PXENVBD_PDO Pdo,
@@ -176,58 +204,59 @@ PdoDebugCallback(
 {
     if (Pdo == NULL || DebugInterface == NULL || DebugCallback == NULL)
         return;
-
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Signature              : %08x\n", 
-          Pdo->Signature);
-
     if (Pdo->Signature != PDO_SIGNATURE)
         return;
 
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Fdo                    : 0x%p\n", 
-          Pdo->Fdo);
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: DeviceObject           : 0x%p\n", 
+          "PDO: Fdo 0x%p DeviceObject 0x%p\n",
+          Pdo->Fdo,
           Pdo->DeviceObject);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: ReferenceCount         : %d\n", 
+          "PDO: ReferenceCount %d\n",
           Pdo->ReferenceCount);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: DevicePnpState         : %s (%s)\n",
+          "PDO: DevicePnpState %s (%s)\n",
           __PnpStateName(Pdo->DevicePnpState),
           __PnpStateName(Pdo->PrevPnpState));
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: DevicePowerState       : %s\n",
+          "PDO: DevicePowerState %s\n",
           PowerDeviceStateName(Pdo->DevicePowerState));
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: EmulatedUnplugged      : %s\n", 
-          Pdo->EmulatedUnplugged ? "TRUE" : "FALSE");
-    DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Missing                : %s\n",
+          "PDO: %s %s\n",
+          Pdo->EmulatedUnplugged ? "PV" : "EMULATED",
           Pdo->Missing ? Pdo->Reason : "Not Missing");
 
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: BLKIF_OP_: READ=%u WRITE=%u BARRIER=%u DISCARD=%u\n",
-          Pdo->BlkOpRead, Pdo->BlkOpWrite,
+          "PDO: BLKIF_OPs: READ=%u WRITE=%u\n",
+          Pdo->BlkOpRead, Pdo->BlkOpWrite);
+    DEBUG(Printf, DebugInterface, DebugCallback,
+          "PDO: BLKIF_OPs: INDIRECT_READ=%u INDIRECT_WRITE=%u\n",
+          Pdo->BlkOpIndirectRead, Pdo->BlkOpIndirectWrite);
+    DEBUG(Printf, DebugInterface, DebugCallback,
+          "PDO: BLKIF_OPs: BARRIER=%u DISCARD=%u\n",
           Pdo->BlkOpBarrier, Pdo->BlkOpDiscard);
     DEBUG(Printf, DebugInterface, DebugCallback,
-          "PDO: Failed: Allocs=%u Maps=%u Bounces=%u Grants=%u\n",
-          Pdo->FailedAllocs, Pdo->FailedMaps,
-          Pdo->FailedBounces, Pdo->FailedGrants);
+          "PDO: Failed: Maps=%u Bounces=%u Grants=%u\n",
+          Pdo->FailedMaps, Pdo->FailedBounces, Pdo->FailedGrants);
     DEBUG(Printf, DebugInterface, DebugCallback,
           "PDO: Segments Granted=%llu Bounced=%llu\n",
           Pdo->SegsGranted, Pdo->SegsBounced);
 
-    Pdo->BlkOpRead = Pdo->BlkOpWrite = Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
-    Pdo->FailedAllocs = Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
-    Pdo->SegsGranted = Pdo->SegsBounced = 0;
+    __LookasideDebug(&Pdo->RequestList, DebugInterface, DebugCallback, "REQUESTs");
+    __LookasideDebug(&Pdo->SegmentList, DebugInterface, DebugCallback, "SEGMENTs");
+    __LookasideDebug(&Pdo->ContextList, DebugInterface, DebugCallback, "CONTEXTs");
 
     FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->FreshSrbs, "Fresh", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->PreparedReqs, "Prepared", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->FreshSrbs,    "Fresh    ", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->PreparedReqs, "Prepared ", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
-    QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown", DebugInterface, DebugCallback);
+    QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown ", DebugInterface, DebugCallback);
+
+    Pdo->BlkOpRead = Pdo->BlkOpWrite = 0;
+    Pdo->BlkOpIndirectRead = Pdo->BlkOpIndirectWrite = 0;
+    Pdo->BlkOpBarrier = Pdo->BlkOpDiscard = 0;
+    Pdo->FailedMaps = Pdo->FailedBounces = Pdo->FailedGrants = 0;
+    Pdo->SegsGranted = Pdo->SegsBounced = 0;
 }
 
 //=============================================================================
@@ -391,7 +420,8 @@ __LookasideInit(
     IN  ULONG                   Tag
     )
 {
-    Lookaside->Used = 0;
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
+    Lookaside->Size = Size;
     KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
     ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
                                     Size, Tag, 0);
@@ -416,11 +446,16 @@ __LookasideAlloc(
     PVOID   Buffer;
 
     Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
-    if (Buffer == NULL)
+    if (Buffer == NULL) {
+        ++Lookaside->Failed;
         return NULL;
+    }
 
+    RtlZeroMemory(Buffer, Lookaside->Size);
     Result = InterlockedIncrement(&Lookaside->Used);
     ASSERT3S(Result, >, 0);
+    if (Result > Lookaside->Max)
+        Lookaside->Max = Result;
     KeClearEvent(&Lookaside->Empty);
 
     return Buffer;
@@ -490,6 +525,8 @@ PdoCreate(
         goto fail2;
 
     __LookasideInit(&Pdo->RequestList, sizeof(XENVBD_REQUEST), REQUEST_POOL_TAG);
+    __LookasideInit(&Pdo->SegmentList, SEGMENT_LIST_SIZE, SEGMENT_POOL_TAG);
+    __LookasideInit(&Pdo->ContextList, CONTEXT_LIST_SIZE, CONTEXT_POOL_TAG);
 
     Status = PdoD3ToD0(Pdo);
     if (!NT_SUCCESS(Status))
@@ -508,6 +545,8 @@ fail4:
 
 fail3:
     Error("Fail3\n");
+    __LookasideTerm(&Pdo->ContextList);
+    __LookasideTerm(&Pdo->SegmentList);
     __LookasideTerm(&Pdo->RequestList);
     FrontendDestroy(Pdo->Frontend);
     Pdo->Frontend = NULL;
@@ -527,7 +566,7 @@ PdoDestroy(
     )
 {
     const ULONG TargetId = PdoGetTargetId(Pdo);
-    PVOID       Objects[2];
+    PVOID       Objects[4];
 
     Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
     Verbose("Target[%d] : Destroying\n", TargetId);
@@ -544,10 +583,14 @@ PdoDestroy(
     Verbose("Target[%d] : ReferenceCount %d, RequestListUsed %d\n", TargetId, Pdo->ReferenceCount, Pdo->RequestList.Used);
     Objects[0] = &Pdo->RemoveEvent;
     Objects[1] = &Pdo->RequestList.Empty;
-    KeWaitForMultipleObjects(2, Objects, WaitAll, Executive, KernelMode, FALSE, NULL, NULL);
+    Objects[2] = &Pdo->SegmentList.Empty;
+    Objects[3] = &Pdo->ContextList.Empty;
+    KeWaitForMultipleObjects(4, Objects, WaitAll, Executive, KernelMode, FALSE, NULL, NULL);
     ASSERT3S(Pdo->ReferenceCount, ==, 0);
     ASSERT3U(PdoGetDevicePnpState(Pdo), ==, Deleted);
 
+    __LookasideTerm(&Pdo->ContextList);
+    __LookasideTerm(&Pdo->SegmentList);
     __LookasideTerm(&Pdo->RequestList);
 
     FrontendDestroy(Pdo->Frontend);
@@ -760,6 +803,28 @@ PdoSectorSize(
 
 //=============================================================================
 
+static FORCEINLINE VOID
+__PdoIncBlkifOpCount(
+    __in PXENVBD_PDO             Pdo,
+    __in PXENVBD_REQUEST         Request
+    )
+{
+    switch (Request->Operation) {
+    case BLKIF_OP_READ:             ++Pdo->BlkOpRead;       break;
+    case BLKIF_OP_WRITE:            ++Pdo->BlkOpWrite;      break;
+    case BLKIF_OP_WRITE_BARRIER:    ++Pdo->BlkOpBarrier;    break;
+    case BLKIF_OP_DISCARD:          ++Pdo->BlkOpDiscard;    break;
+    case BLKIF_OP_INDIRECT:
+        switch (Request->u.Indirect.Operation) {
+        case BLKIF_OP_READ:         ++Pdo->BlkOpIndirectRead;   break;
+        case BLKIF_OP_WRITE:        ++Pdo->BlkOpIndirectWrite;  break;
+        default:                    ASSERT(FALSE);              break;
+        }
+        break;
+    default:                        ASSERT(FALSE);          break;
+    }
+}
+
 static FORCEINLINE ULONG
 __SectorsPerPage(
     __in ULONG                   SectorSize
@@ -799,11 +864,21 @@ __Offset(
 }
 
 static FORCEINLINE PFN_NUMBER
-__Pfn(
+__Phys2Pfn(
     __in STOR_PHYSICAL_ADDRESS   PhysAddr
     )
 {
     return (PFN_NUMBER)(PhysAddr.QuadPart >> PAGE_SHIFT);
+}
+
+extern PHYSICAL_ADDRESS MmGetPhysicalAddress(PVOID);
+
+static FORCEINLINE PFN_NUMBER
+__Virt2Pfn(
+    __in PVOID                   VirtAddr
+    )
+{
+    return (PFN_NUMBER)(MmGetPhysicalAddress(VirtAddr).QuadPart >> PAGE_SHIFT);
 }
 
 static FORCEINLINE MM_PAGE_PRIORITY
@@ -859,7 +934,7 @@ SGListNext(
 static FORCEINLINE BOOLEAN
 MapSegmentBuffer(
     IN  PXENVBD_PDO             Pdo,
-    IN  PXENVBD_SEGMENT         Segment,
+    IN  PXENVBD_CONTEXT         Context,
     IN  PXENVBD_SG_LIST         SGList,
     IN  ULONG                   SectorSize,
     IN  ULONG                   SectorsNow
@@ -870,7 +945,7 @@ MapSegmentBuffer(
     // map PhysAddr to 1 or 2 pages and lock for VirtAddr
 #pragma warning(push)
 #pragma warning(disable:28145)
-    Mdl = &Segment->Mdl;
+    Mdl = &Context->Mdl;
     Mdl->Next           = NULL;
     Mdl->Size           = (SHORT)(sizeof(MDL) + sizeof(PFN_NUMBER));
     Mdl->MdlFlags       = MDL_PAGES_LOCKED;
@@ -879,13 +954,13 @@ MapSegmentBuffer(
     Mdl->StartVa        = NULL;
     Mdl->ByteCount      = SGList->PhysLen;
     Mdl->ByteOffset     = __Offset(SGList->PhysAddr);
-    Segment->Pfn[0]     = __Pfn(SGList->PhysAddr);
+    Context->Pfn[0]     = __Phys2Pfn(SGList->PhysAddr);
 
     if (SGList->PhysLen < SectorsNow * SectorSize) {
         SGListGet(SGList);
         Mdl->Size       += sizeof(PFN_NUMBER);
         Mdl->ByteCount  = Mdl->ByteCount + SGList->PhysLen;
-        Segment->Pfn[1] = __Pfn(SGList->PhysAddr);
+        Context->Pfn[1] = __Phys2Pfn(SGList->PhysAddr);
     }
 #pragma warning(pop)
 
@@ -893,15 +968,15 @@ MapSegmentBuffer(
     ASSERT3U(Mdl->ByteCount, <=, PAGE_SIZE);
     ASSERT3U(SectorsNow, ==, (Mdl->ByteCount / SectorSize));
                 
-    Segment->Length = __min(Mdl->ByteCount, PAGE_SIZE);
-    Segment->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode, 
+    Context->Length = __min(Mdl->ByteCount, PAGE_SIZE);
+    Context->Buffer = MmMapLockedPagesSpecifyCache(Mdl, KernelMode,
                             MmCached, NULL, FALSE, __PdoPriority(Pdo));
-    if (!Segment->Buffer) {
+    if (!Context->Buffer) {
         goto fail;
     }
 
-    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Segment->Pfn[0]);
-    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Segment->Pfn[1]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[0], ==, Context->Pfn[0]);
+    ASSERT3P(MmGetMdlPfnArray(Mdl)[1], ==, Context->Pfn[1]);
  
     return TRUE;
 
@@ -911,40 +986,23 @@ fail:
 
 static FORCEINLINE VOID
 UnmapSegmentBuffer(
-    IN  PXENVBD_SEGMENT         Segment
+    IN  PXENVBD_CONTEXT         Context
     )
 {
-    MmUnmapLockedPages(Segment->Buffer, &Segment->Mdl);
-    RtlZeroMemory(&Segment->Mdl, sizeof(Segment->Mdl));
-    RtlZeroMemory(Segment->Pfn, sizeof(Segment->Pfn));
-}
-
-static FORCEINLINE PXENVBD_REQUEST
-RequestGet(
-    IN  PXENVBD_PDO             Pdo
-    )
-{
-    PVOID   Request;
-
-    Request = __LookasideAlloc(&Pdo->RequestList);
-    if (Request == NULL)
-        goto fail;
-
-    RtlZeroMemory(Request, sizeof(XENVBD_REQUEST));
-    return Request;
-
-fail:
-    ++Pdo->FailedAllocs;
-    return NULL;
+    MmUnmapLockedPages(Context->Buffer, &Context->Mdl);
+    RtlZeroMemory(&Context->Mdl, sizeof(Context->Mdl));
+    RtlZeroMemory(Context->Pfn, sizeof(Context->Pfn));
+    Context->Buffer = NULL;
+    Context->Length = 0;
 }
 
 static FORCEINLINE VOID
-RequestPut(
+RequestCleanup(
     IN  PXENVBD_PDO             Pdo,
     IN  PXENVBD_REQUEST         Request
     )
 {
-    ULONG           Index;
+    ULONG           Index, Index2;
     PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
 
     // cleanup granted/mapped buffers
@@ -953,22 +1011,53 @@ RequestPut(
     case BLKIF_OP_WRITE:
         for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
             PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-
-            // ungrant (if granted)
             if (Segment->GrantRef)
                 GranterPut(Granter, Segment->GrantRef);
             Segment->GrantRef = 0;
-            
-            // release buffer (if got)
-            if (Segment->BufferId)
-                BufferPut(Segment->BufferId);
-            Segment->BufferId = NULL;
-            
-            // unmap buffer (if mapped)
-            if (Segment->Buffer)
-                UnmapSegmentBuffer(Segment);
-            Segment->Buffer = NULL;
-            Segment->Length = 0;
+        }
+        for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
+            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
+            if (Context->BufferId)
+                BufferPut(Context->BufferId);
+            Context->BufferId = NULL;
+            if (Context->Buffer)
+                UnmapSegmentBuffer(Context);
+        }
+        break;
+
+    case BLKIF_OP_INDIRECT:
+        for (Index = 0; Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST; ++Index) {
+            if (Request->u.Indirect.Grants[Index])
+                GranterPut(Granter, Request->u.Indirect.Grants[Index]);
+            Request->u.Indirect.Grants[Index] = 0;
+        }
+        for (Index = 0; Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST; ++Index) {
+            PXENVBD_SEGMENT SegmentList = Request->u.Indirect.Segments[Index];
+            if (SegmentList == NULL)
+                continue;
+            for (Index2 = 0; Index2 < SEGMENTS_PER_PAGE; ++Index2) {
+                PXENVBD_SEGMENT Segment = &SegmentList[Index2];
+                if (Segment->GrantRef)
+                    GranterPut(Granter, Segment->GrantRef);
+                Segment->GrantRef = 0;
+            }
+            __LookasideFree(&Pdo->SegmentList, SegmentList);
+            Request->u.Indirect.Segments[Index] = NULL;
+        }
+        for (Index = 0; Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST; ++Index) {
+            PXENVBD_CONTEXT ContextList = Request->u.Indirect.Contexts[Index];
+            if (ContextList == NULL)
+                continue;
+            for (Index2 = 0; Index2 < SEGMENTS_PER_PAGE; ++Index2) {
+                PXENVBD_CONTEXT Context = &ContextList[Index2];
+                if (Context->BufferId)
+                    BufferPut(Context->BufferId);
+                Context->BufferId = NULL;
+                if (Context->Buffer)
+                    UnmapSegmentBuffer(Context);
+            }
+            __LookasideFree(&Pdo->ContextList, ContextList);
+            Request->u.Indirect.Contexts[Index] = NULL;
         }
         break;
 
@@ -976,9 +1065,6 @@ RequestPut(
         // no special cleanup
         break;
     }
-
-    // Free the request to lookaside
-    __LookasideFree(&Pdo->RequestList, Request);
 }
 
 static FORCEINLINE VOID
@@ -986,17 +1072,44 @@ RequestCopyOutput(
     __in PXENVBD_REQUEST         Request
     )
 {
-    ULONG       Index;
+    ULONG       Index, Index2;
+    ULONG       NrSegments;
 
     switch (Request->Operation) {
     case BLKIF_OP_READ:
-        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+        NrSegments = Request->u.ReadWrite.NrSegments;
+        for (Index = 0;
+                    Index < BLKIF_MAX_SEGMENTS_PER_REQUEST &&
+                    NrSegments > 0;
+                            ++Index, --NrSegments) {
+            PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
 
-        for (Index = 0; Index < Request->u.ReadWrite.NrSegments; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+            if (Context->BufferId)
+                BufferCopyOut(Context->BufferId, Context->Buffer, Context->Length);
+        }
+        break;
 
-            if (Segment->BufferId)
-                BufferCopyOut(Segment->BufferId, Segment->Buffer, Segment->Length);
+    case BLKIF_OP_INDIRECT:
+        if (Request->u.Indirect.Operation != BLKIF_OP_READ)
+            break; // not an INDIRECT READ, dont copy any data
+
+        NrSegments = Request->u.Indirect.NrSegments;
+        for (Index = 0;
+                    Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST &&
+                    NrSegments > 0;
+                            ++Index) {
+            PXENVBD_CONTEXT ContextList = Request->u.Indirect.Contexts[Index];
+            if (ContextList == NULL)
+                continue;
+            for (Index2 = 0;
+                        Index2 < SEGMENTS_PER_PAGE &&
+                        NrSegments > 0;
+                                ++Index2, --NrSegments) {
+                PXENVBD_CONTEXT Context = &ContextList[Index2];
+
+                if (Context->BufferId)
+                    BufferCopyOut(Context->BufferId, Context->Buffer, Context->Length);
+            }
         }
         break;
 
@@ -1004,6 +1117,225 @@ RequestCopyOutput(
         // not a READ, dont copy any data
         break;
     }
+}
+
+static NTSTATUS
+PrepareSegment(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_SEGMENT         Segment,
+    IN  PXENVBD_CONTEXT         Context,
+    IN  PXENVBD_SG_LIST         SGList,
+    IN  BOOLEAN                 ReadOnly,
+    IN  ULONG                   SectorsLeft,
+    OUT PULONG                  SectorsNow
+    )
+{
+    PFN_NUMBER      Pfn;
+    NTSTATUS        Status = STATUS_UNSUCCESSFUL;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
+    const ULONG     SectorSize = PdoSectorSize(Pdo);
+    const ULONG     SectorsPerPage = __SectorsPerPage(SectorSize);
+
+    if (SGListNext(SGList, SectorSize - 1)) {
+        ++Pdo->SegsGranted;
+        // get first sector, last sector and count
+        Segment->FirstSector    = (UCHAR)((__Offset(SGList->PhysAddr) + SectorSize - 1) / SectorSize);
+        *SectorsNow             = __min(SectorsLeft, SectorsPerPage - Segment->FirstSector);
+        Segment->LastSector     = (UCHAR)(Segment->FirstSector + *SectorsNow - 1);
+        Context->BufferId       = NULL; // granted, ensure its null
+        Context->Buffer         = NULL; // granted, ensure its null
+        Context->Length         = 0;    // granted, ensure its 0
+        Pfn                     = __Phys2Pfn(SGList->PhysAddr);
+
+        ASSERT3U((SGList->PhysLen / SectorSize), ==, *SectorsNow);
+        ASSERT3U((SGList->PhysLen & (SectorSize - 1)), ==, 0);
+    } else {
+        ++Pdo->SegsBounced;
+        // get first sector, last sector and count
+        Segment->FirstSector    = 0;
+        *SectorsNow             = __min(SectorsLeft, SectorsPerPage);
+        Segment->LastSector     = (UCHAR)(*SectorsNow - 1);
+
+        // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
+        if (!MapSegmentBuffer(Pdo, Context, SGList, SectorSize, *SectorsNow)) {
+            ++Pdo->FailedMaps;
+            goto fail;
+        }
+
+        // get a buffer
+        if (!BufferGet(Segment, &Context->BufferId, &Pfn)) {
+            ++Pdo->FailedBounces;
+            goto fail;
+        }
+
+        // copy contents in
+        if (ReadOnly) { // Operation == BLKIF_OP_WRITE
+            BufferCopyIn(Context->BufferId, Context->Buffer, Context->Length);
+        }
+    }
+
+    // Grant segment's page
+    Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
+    if (!NT_SUCCESS(Status)) {
+        ++Pdo->FailedGrants;
+        goto fail;
+    }
+
+    return STATUS_SUCCESS;
+
+fail:
+    return Status;
+}
+
+static NTSTATUS
+PrepareBlkifReadWrite(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_REQUEST         Request,
+    IN  PXENVBD_SG_LIST         SGList,
+    IN  ULONG64                 SectorStart,
+    IN  ULONG                   SectorsLeft,
+    OUT PULONG                  SectorsDone
+    )
+{
+    NTSTATUS        Status;
+    UCHAR           Operation;
+    BOOLEAN         ReadOnly;
+    ULONG           Index;
+    __Operation(Cdb_OperationEx(Request->Srb), &Operation, &ReadOnly);
+
+    Request->Operation  = Operation;
+    Request->u.ReadWrite.NrSegments = 0;
+    Request->u.ReadWrite.FirstSector = SectorStart;
+
+    for (Index = 0;
+                Index < BLKIF_MAX_SEGMENTS_PER_REQUEST &&
+                SectorsLeft > 0;
+                        ++Index) {
+        PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
+        PXENVBD_CONTEXT Context = &Request->u.ReadWrite.Contexts[Index];
+        ULONG           SectorsNow;
+
+        Request->u.ReadWrite.NrSegments++;
+        Status = PrepareSegment(Pdo,
+                                Segment,
+                                Context,
+                                SGList,
+                                ReadOnly,
+                                SectorsLeft,
+                                &SectorsNow);
+        if (!NT_SUCCESS(Status))
+            goto fail;
+
+        *SectorsDone += SectorsNow;
+        SectorsLeft  -= SectorsNow;
+    }
+    ASSERT3U(Request->u.ReadWrite.NrSegments, >, 0);
+    ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+
+    return STATUS_SUCCESS;
+
+fail:
+    return Status;
+}
+
+static NTSTATUS
+PrepareBlkifIndirect(
+    IN  PXENVBD_PDO             Pdo,
+    IN  PXENVBD_REQUEST         Request,
+    IN  PXENVBD_SG_LIST         SGList,
+    IN  ULONG64                 SectorStart,
+    IN  ULONG                   SectorsLeft,
+    OUT PULONG                  SectorsDone
+    )
+{
+    ULONG           Index, Index2;
+    UCHAR           Operation;
+    BOOLEAN         ReadOnly;
+    NTSTATUS        Status;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
+    const ULONG     MaxSegments = FrontendGetFeatures(Pdo->Frontend)->Indirect;
+    __Operation(Cdb_OperationEx(Request->Srb), &Operation, &ReadOnly);
+
+    Request->Operation = BLKIF_OP_INDIRECT;
+    Request->u.Indirect.Operation = Operation;
+    Request->u.Indirect.NrSegments = 0;
+    Request->u.Indirect.FirstSector = SectorStart;
+
+    for (Index = 0;
+                Index < BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST &&
+                SectorsLeft > 0 &&
+                Request->u.Indirect.NrSegments < MaxSegments;
+                        ++Index) {
+        PXENVBD_SEGMENT SegmentList;
+        PXENVBD_CONTEXT ContextList;
+
+        Status = STATUS_NO_MEMORY;
+        Request->u.Indirect.Segments[Index] = SegmentList = __LookasideAlloc(&Pdo->SegmentList);
+        if (SegmentList == NULL)
+            goto fail;
+
+        Status = STATUS_NO_MEMORY;
+        Request->u.Indirect.Contexts[Index] = ContextList = __LookasideAlloc(&Pdo->ContextList);
+        if (ContextList == NULL)
+            goto fail;
+
+        for (Index2 = 0;
+                    Index2 < SEGMENTS_PER_PAGE &&
+                    SectorsLeft > 0 &&
+                    Request->u.Indirect.NrSegments < MaxSegments;
+                            ++Index2) {
+            PXENVBD_SEGMENT Segment = &SegmentList[Index2];
+            PXENVBD_CONTEXT Context = &ContextList[Index2];
+            ULONG           SectorsNow = 0;
+
+            Request->u.Indirect.NrSegments++;
+            Status = PrepareSegment(Pdo,
+                                    Segment,
+                                    Context,
+                                    SGList,
+                                    ReadOnly,
+                                    SectorsLeft,
+                                    &SectorsNow);
+            if(!NT_SUCCESS(Status))
+                goto fail;
+
+            *SectorsDone += SectorsNow;
+            SectorsLeft  -= SectorsNow;
+        }
+
+        Status = GranterGet(Granter,
+                            __Virt2Pfn(SegmentList),
+                            TRUE,
+                            &Request->u.Indirect.Grants[Index]);
+        if (!NT_SUCCESS(Status)) {
+            ++Pdo->FailedGrants;
+            goto fail;
+        }
+    }
+
+    ASSERT3U(Request->u.Indirect.NrSegments, >, 0);
+    ASSERT3U(Request->u.Indirect.NrSegments, <=, MaxSegments);
+    return STATUS_SUCCESS;
+
+fail:
+    return Status;
+}
+
+static FORCEINLINE BOOLEAN
+UseIndirect(
+    IN  PXENVBD_PDO             Pdo,
+    IN  ULONG                   SectorsLeft
+    )
+{
+    const ULONG SectorsPerPage = __SectorsPerPage(PdoSectorSize(Pdo));
+
+    if (FrontendGetFeatures(Pdo->Frontend)->Indirect == 0)
+        return FALSE; // not supported
+
+    if (SectorsLeft < BLKIF_MAX_SEGMENTS_PER_REQUEST * SectorsPerPage)
+        return FALSE; // first into a single BLKIF_OP_{READ/WRITE}
+
+    return TRUE;
 }
 
 __checkReturn
@@ -1014,129 +1346,63 @@ PrepareReadWrite(
     )
 {
     NTSTATUS        Status;
-    ULONG           SectorsDone;
-    UCHAR           Operation;
-    BOOLEAN         ReadOnly;
-    ULONG           Index;
     LIST_ENTRY      ReqList;
-
-    PMDL            OriginalMDL;
-    ULONG           GotMDL;
-
     XENVBD_SG_LIST  SGList;
-    PXENVBD_GRANTER Granter = FrontendGetGranter(Pdo->Frontend);
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-
-    const ULONG64   StartSector     = Cdb_LogicalBlock(Srb);
-    const ULONG     NumSectors      = Cdb_TransferBlock(Srb);
-    const ULONG     SectorSize      = PdoSectorSize(Pdo);
-    const ULONG     SectorsPerPage  = __SectorsPerPage(SectorSize);
-    __Operation(Cdb_OperationEx(Srb), &Operation, &ReadOnly);
+    ULONG64         SectorStart = Cdb_LogicalBlock(Srb);
+    ULONG           SectorsLeft = Cdb_TransferBlock(Srb);
 
     InitializeListHead(&ReqList);
-
     RtlZeroMemory(&SGList, sizeof(SGList));
     SGList.SGList = StorPortGetScatterGatherList(PdoGetFdo(Pdo), Srb);
 
-    GotMDL = StorPortGetOriginalMdl(PdoGetFdo(Pdo), Srb, &OriginalMDL);
-    if (GotMDL !=STATUS_SUCCESS) {
-        Warning("Didn't get mdl to check if mapped\n");
-    }
-
-    SectorsDone = 0;
     SrbExt->Count = 0;
     // mark the SRB as pending, completion will check for pending to detect failures
     Srb->SrbStatus = SRB_STATUS_PENDING;
 
-    do {
-        PXENVBD_REQUEST Request = RequestGet(Pdo);
+    while (SectorsLeft > 0) {
+        ULONG           SectorsDone = 0;
+        PXENVBD_REQUEST Request = __LookasideAlloc(&Pdo->RequestList);
+
+        Status = STATUS_NO_MEMORY;
         if (Request == NULL) 
             goto fail;
         
+        Request->Srb        = Srb;
         InsertTailList(&ReqList, &Request->Entry);
         InterlockedIncrement(&SrbExt->Count);
 
-        Request->Srb        = Srb;
-        Request->Operation  = Operation;
-
-        Request->u.ReadWrite.NrSegments = 0;
-        Request->u.ReadWrite.FirstSector = StartSector + SectorsDone;
-        for (Index = 0; Index < BLKIF_MAX_SEGMENTS_PER_REQUEST && SectorsDone != NumSectors; ++Index) {
-            PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-            PFN_NUMBER      Pfn;
-            ULONG           SectorsNow;
-
-            Request->u.ReadWrite.NrSegments++;
-            
-            if (SGListNext(&SGList, SectorSize - 1)) {
-                ++Pdo->SegsGranted;
-                // get first sector, last sector and count
-                Segment->FirstSector    = (UCHAR)((__Offset(SGList.PhysAddr) + SectorSize - 1) / SectorSize);
-                SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage - Segment->FirstSector);
-                Segment->LastSector     = (UCHAR)(Segment->FirstSector + SectorsNow - 1);
-                Segment->BufferId       = NULL; // granted, ensure its null
-                Segment->Buffer         = NULL; // granted, ensure its null
-                Segment->Length         = 0;    // granted, ensure its 0
-                Pfn                     = __Pfn(SGList.PhysAddr);
-
-                ASSERT3U((SGList.PhysLen / SectorSize), ==, SectorsNow);
-                ASSERT3U((SGList.PhysLen & (SectorSize - 1)), ==, 0);
-            } else {
-                ++Pdo->SegsBounced;
-                // get first sector, last sector and count
-                Segment->FirstSector    = 0;
-                SectorsNow              = __min(NumSectors - SectorsDone, SectorsPerPage);
-                Segment->LastSector     = (UCHAR)(SectorsNow - 1);
-
-                // FIXME - This depends on an opaque MDL field, and should
-                // not be released to the public.  It is for investigation
-                // purposes only
-                if ((GotMDL == STATUS_SUCCESS) && ((OriginalMDL->MdlFlags & MDL_MAPPED_TO_SYSTEM_VA) != 0)) {
-                    Warning("Mapping a previously kernel mapped MDL\n");
-                }
-
-                // map SGList to Virtual Address. Populates Segment->Buffer and Segment->Length
-                if (!MapSegmentBuffer(Pdo, Segment, &SGList, SectorSize, SectorsNow)) {
-                    ++Pdo->FailedMaps;
-                    goto fail;
-                }
-
-                // get a buffer
-                if (!BufferGet(Srb, &Segment->BufferId, &Pfn)) {
-                    ++Pdo->FailedBounces;
-                    goto fail;
-                }
-
-                // copy contents in
-                if (Operation == BLKIF_OP_WRITE) {
-                    BufferCopyIn(Segment->BufferId, Segment->Buffer, Segment->Length);
-                }
-            }
-
-            // Grant segment's page
-            Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
-            if (!NT_SUCCESS(Status)) {
-                ++Pdo->FailedGrants;
-                goto fail;
-            }
-            
-            SectorsDone += SectorsNow;
+        if (UseIndirect(Pdo, SectorsLeft)) {
+            Status = PrepareBlkifIndirect(Pdo,
+                                           Request,
+                                           &SGList,
+                                           SectorStart,
+                                           SectorsLeft,
+                                           &SectorsDone);
+        } else {
+            Status = PrepareBlkifReadWrite(Pdo,
+                                           Request,
+                                           &SGList,
+                                           SectorStart,
+                                           SectorsLeft,
+                                           &SectorsDone);
         }
-        ASSERT3U(Request->u.ReadWrite.NrSegments, >, 0);
-        ASSERT3U(Request->u.ReadWrite.NrSegments, <=, BLKIF_MAX_SEGMENTS_PER_REQUEST);
+        if (!NT_SUCCESS(Status))
+            goto fail;
 
-    } while (SectorsDone < NumSectors);
+        SectorsLeft -= SectorsDone;
+        SectorStart += SectorsDone;
+    }
 
     // completed preparing SRB, move requests to pending queue
-    switch (Operation) {
-    case BLKIF_OP_READ:     Pdo->BlkOpRead++;       break;
-    case BLKIF_OP_WRITE:    Pdo->BlkOpWrite++;      break;
-    default:                ASSERT(FALSE);          break;
-    }
     for (;;) {
-        PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = RemoveHeadList(&ReqList);
         if (Entry == &ReqList)
             break;
+
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        __PdoIncBlkifOpCount(Pdo, Request);
         QueueAppend(&Pdo->PreparedReqs, Entry);
     }
     return STATUS_SUCCESS;
@@ -1144,15 +1410,18 @@ PrepareReadWrite(
 fail:
     for (;;) {
         PXENVBD_REQUEST Request;
-        PLIST_ENTRY Entry = RemoveHeadList(&ReqList);
+        PLIST_ENTRY     Entry = RemoveHeadList(&ReqList);
         if (Entry == &ReqList)
             break;
+
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-        RequestPut(Pdo, Request);
+        RequestCleanup(Pdo, Request);
+        __LookasideFree(&Pdo->RequestList, Request);
         InterlockedDecrement(&SrbExt->Count);
     }
     ASSERT3S(SrbExt->Count, ==, 0);
-    return STATUS_UNSUCCESSFUL;
+    ASSERT(!NT_SUCCESS(Status));
+    return Status;
 }
 
 __checkReturn
@@ -1163,7 +1432,7 @@ PrepareSyncCache(
     )
 {
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-    PXENVBD_REQUEST Request = RequestGet(Pdo);
+    PXENVBD_REQUEST Request = __LookasideAlloc(&Pdo->RequestList);
     if (Request == NULL)
         return STATUS_UNSUCCESSFUL;
     
@@ -1176,7 +1445,7 @@ PrepareSyncCache(
 
     Request->u.Barrier.FirstSector = Cdb_LogicalBlock(Srb);
 
-    Pdo->BlkOpBarrier++;
+    __PdoIncBlkifOpCount(Pdo, Request);
     QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
     return STATUS_SUCCESS;
 }
@@ -1189,7 +1458,7 @@ PrepareUnmap(
     )
 {
     PXENVBD_SRBEXT  SrbExt = GetSrbExt(Srb);
-    PXENVBD_REQUEST Request = RequestGet(Pdo);
+    PXENVBD_REQUEST Request = __LookasideAlloc(&Pdo->RequestList);
     if (Request == NULL)
         return STATUS_UNSUCCESSFUL;
 
@@ -1204,7 +1473,7 @@ PrepareUnmap(
     Request->u.Discard.NrSectors   = Cdb_TransferBlock(Srb);
     Request->u.Discard.Flags       = 0;
 
-    Pdo->BlkOpDiscard++;
+    __PdoIncBlkifOpCount(Pdo, Request);
     QueueAppend(&Pdo->PreparedReqs, &Request->Entry);
     return STATUS_SUCCESS;
 }
@@ -1312,7 +1581,8 @@ PdoCompleteSubmitted(
     }
 
     QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
-    RequestPut(Pdo, Request);
+    RequestCleanup(Pdo, Request);
+    __LookasideFree(&Pdo->RequestList, Request);
 
     // complete srb
     if (InterlockedDecrement(&SrbExt->Count) == 0) {
@@ -1373,7 +1643,8 @@ PdoPreResume(
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         SrbExt = GetSrbExt(Request->Srb);
 
-        RequestPut(Pdo, Request);
+        RequestCleanup(Pdo, Request);
+        __LookasideFree(&Pdo->RequestList, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
             InsertTailList(&List, &SrbExt->Entry);
@@ -1390,7 +1661,8 @@ PdoPreResume(
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
         SrbExt = GetSrbExt(Request->Srb);
 
-        RequestPut(Pdo, Request);
+        RequestCleanup(Pdo, Request);
+        __LookasideFree(&Pdo->RequestList, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
             InsertTailList(&List, &SrbExt->Entry);
@@ -1524,7 +1796,7 @@ PdoSyncCache(
         return TRUE;
     }
 
-    if (FrontendGetFeatures(Pdo->Frontend)->Barrier == FALSE) {
+    if (FrontendGetDiskInfo(Pdo->Frontend)->Barrier == FALSE) {
         Trace("Target[%d] : BARRIER not supported, suppressing\n", PdoGetTargetId(Pdo));
         Srb->ScsiStatus = 0x00; // SCSI_GOOD
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
@@ -1560,7 +1832,7 @@ PdoUnmap(
         return TRUE;
     }
 
-    if (FrontendGetFeatures(Pdo->Frontend)->Discard == FALSE) {
+    if (FrontendGetDiskInfo(Pdo->Frontend)->Discard == FALSE) {
         Trace("Target[%d] : DISCARD not supported, suppressing\n", PdoGetTargetId(Pdo));
         Srb->ScsiStatus = 0x00; // SCSI_GOOD
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
@@ -1939,7 +2211,8 @@ PdoReset(
             Verbose("Target[%d] : SubmittedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
         
             SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-            RequestPut(Pdo, Request);
+            RequestCleanup(Pdo, Request);
+            __LookasideFree(&Pdo->RequestList, Request);
 
             if (InterlockedDecrement(&SrbExt->Count) == 0) {
                 SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
@@ -2058,7 +2331,8 @@ PdoAbortAllSrbs(
         Verbose("Target[%d] : PreparedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
         
         SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-        RequestPut(Pdo, Request);
+        RequestCleanup(Pdo, Request);
+        __LookasideFree(&Pdo->RequestList, Request);
 
         if (InterlockedDecrement(&SrbExt->Count) == 0) {
             SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
