@@ -1011,9 +1011,9 @@ RequestCleanup(
     case BLKIF_OP_WRITE:
         for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
             PXENVBD_SEGMENT Segment = &Request->u.ReadWrite.Segments[Index];
-            if (Segment->GrantRef)
-                GranterPut(Granter, Segment->GrantRef);
-            Segment->GrantRef = 0;
+            if (Segment->Grant)
+                GranterPut(Granter, Segment->Grant);
+            Segment->Grant = NULL;
         }
         for (Index = 0; Index < XENVBD_MAX_SEGMENTS_PER_REQUEST; ++Index) {
             PXENVBD_MAPPING Mapping = &Request->u.ReadWrite.Mappings[Index];
@@ -1037,9 +1037,9 @@ RequestCleanup(
                 continue;
             for (Index2 = 0; Index2 < SEGMENTS_PER_PAGE; ++Index2) {
                 PXENVBD_SEGMENT Segment = &SegmentList[Index2];
-                if (Segment->GrantRef)
-                    GranterPut(Granter, Segment->GrantRef);
-                Segment->GrantRef = 0;
+                if (Segment->Grant)
+                    GranterPut(Granter, Segment->Grant);
+                Segment->Grant = NULL;
             }
             __LookasideFree(&Pdo->SegmentList, SegmentList);
             Request->u.Indirect.Segments[Index] = NULL;
@@ -1175,7 +1175,7 @@ PrepareSegment(
     }
 
     // Grant segment's page
-    Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->GrantRef);
+    Status = GranterGet(Granter, Pfn, ReadOnly, &Segment->Grant);
     if (!NT_SUCCESS(Status)) {
         ++Pdo->FailedGrants;
         goto fail;

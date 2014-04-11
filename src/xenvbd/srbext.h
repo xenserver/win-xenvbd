@@ -38,14 +38,11 @@
 #include "assert.h"
 
 // Segments - extension of blkif_segment_t
-#pragma pack(push, 1)
 typedef struct _XENVBD_SEGMENT {
-    ULONG               GrantRef;
+    PVOID               Grant;
     UCHAR               FirstSector;
     UCHAR               LastSector;
-    USHORT              __Padding;
 } XENVBD_SEGMENT, *PXENVBD_SEGMENT;
-#pragma pack(pop)
 
 typedef struct _XENVBD_MAPPING {
     PVOID               BufferId;
@@ -77,7 +74,7 @@ typedef struct _XENVBD_REQUEST_INDIRECT {
     UCHAR               Operation;  // BLKIF_OP_{READ/WRITE}
     USHORT              NrSegments; // 1-4096
     ULONG64             FirstSector;
-    ULONG               Grants[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
+    PVOID               Grants[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
     PXENVBD_SEGMENT     Segments[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
     PXENVBD_MAPPING     Mappings[BLKIF_MAX_INDIRECT_PAGES_PER_REQUEST];
 } XENVBD_REQUEST_INDIRECT, *PXENVBD_REQUEST_INDIRECT;
