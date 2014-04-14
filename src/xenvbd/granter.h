@@ -34,9 +34,9 @@
 
 typedef struct _XENVBD_GRANTER XENVBD_GRANTER, *PXENVBD_GRANTER;
 
-#include "frontend.h"
 #include <debug_interface.h>
 #include <store_interface.h>
+#include "frontend.h"
 
 extern NTSTATUS
 GranterCreate(
@@ -89,13 +89,19 @@ GranterGet(
     IN  PXENVBD_GRANTER             Granter,
     IN  PFN_NUMBER                  Pfn,
     IN  BOOLEAN                     ReadOnly,
-    OUT PULONG                      Grant
+    OUT PVOID                       *Handle
     );
 
 extern VOID
 GranterPut(
     IN  PXENVBD_GRANTER             Granter,
-    IN  ULONG                       Grant
+    IN  PVOID                       Handle
+    );
+
+extern ULONG
+GranterReference(
+    IN  PXENVBD_GRANTER             Granter,
+    IN  PVOID                       Handle
     );
 
 #endif // _XENVBD_GRANTER_H
