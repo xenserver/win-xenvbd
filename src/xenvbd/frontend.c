@@ -531,7 +531,7 @@ __ReadValue32(
     __in  PXENVBD_FRONTEND          Frontend,
     __in  PCHAR                     Name,
     __in  ULONG                     Default,
-    __out_opt PBOOLEAN              Changed
+    __inout_opt PBOOLEAN            Changed
     )
 {
     NTSTATUS        status;
@@ -559,7 +559,7 @@ __ReadValue64(
     __in  PXENVBD_FRONTEND          Frontend,
     __in  PCHAR                     Name,
     __in  ULONG64                   Default,
-    __out_opt PBOOLEAN              Changed
+    __inout_opt PBOOLEAN            Changed
     )
 {
     NTSTATUS        status;
