@@ -86,6 +86,8 @@ NotifierInterrupt(
     
     UNREFERENCED_PARAMETER(Interrupt);
 
+    ASSERT(Notifier);
+
 	++Notifier->NumInts;
 	if (Notifier->Connected) {
 		if (KeInsertQueueDpc(&Notifier->Dpc, NULL, NULL)) {
@@ -107,11 +109,14 @@ NotifierDpc(
     )
 {
     PXENVBD_NOTIFIER    Notifier = Context;
-    PXENVBD_PDO         Pdo = FrontendGetPdo(Notifier->Frontend);
+    PXENVBD_PDO         Pdo;
 
     UNREFERENCED_PARAMETER(Dpc);
     UNREFERENCED_PARAMETER(Arg1);
     UNREFERENCED_PARAMETER(Arg2);
+
+    ASSERT(Notifier);
+    Pdo = FrontendGetPdo(Notifier->Frontend);
 
     if (PdoIsPaused(Pdo)) {
         Warning("Target[%d] : Paused, %d outstanding\n",
