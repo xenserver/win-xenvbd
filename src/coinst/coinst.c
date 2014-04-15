@@ -286,21 +286,6 @@ ModifyBootGPO(
         goto fail1;
     }
 
-    Error = RegQueryValueEx(PnpKey,
-                            "DisableCDDB",
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL);
-    if (Error != ERROR_SUCCESS) {
-        if (Error == ERROR_FILE_NOT_FOUND) {
-            goto done;
-        }
-
-        SetLastError(Error);
-        goto fail2;
-    }
-
     Error = RegSetValueEx(PnpKey,
                           "DisableCDDB",
                           0,
@@ -309,22 +294,7 @@ ModifyBootGPO(
                           (DWORD)sizeof(DWORD));
     if (Error != ERROR_SUCCESS) {
         SetLastError(Error);
-        goto fail3;
-    }
-
-    Error = RegQueryValueEx(PnpKey,
-                            "DontStartRawDevices",
-                            NULL,
-                            NULL,
-                            NULL,
-                            NULL);
-    if (Error != ERROR_SUCCESS) {
-        if (Error == ERROR_FILE_NOT_FOUND) {
-            goto done;
-        }
-
-        SetLastError(Error);
-        goto fail4;
+        goto fail2;
     }
 
     Error = RegSetValueEx(PnpKey,
@@ -335,19 +305,12 @@ ModifyBootGPO(
                           (DWORD)sizeof(DWORD));
     if (Error != ERROR_SUCCESS) {
         SetLastError(Error);
-        goto fail5;
+        goto fail3;
     }
 
-done:
     RegCloseKey(PnpKey);
 
     return TRUE;
-
-fail5:
-    Log("fail5");
-
-fail4:
-    Log("fail4");
 
 fail3:
     Log("fail3");
