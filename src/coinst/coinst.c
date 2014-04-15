@@ -44,6 +44,7 @@ __user_code;
 
 #define MAXIMUM_BUFFER_SIZE 1024
 
+#define PNP_KEY      "SYSTEM\\CurrentControlSet\\Control\\PnP"
 #define SERVICES_KEY "SYSTEM\\CurrentControlSet\\Services"
 
 #define SERVICE_KEY(_Driver)    \
@@ -252,6 +253,72 @@ fail2:
     Log("fail2");
 
     RegCloseKey(UnplugKey);
+
+fail1:
+    Error = GetLastError();
+
+    {
+        PTCHAR  Message;
+
+        Message = GetErrorMessage(Error);
+        Log("fail1 (%s)", Message);
+        LocalFree(Message);
+    }
+
+    return FALSE;
+}
+
+static BOOLEAN
+ModifyBootGPO(
+    )
+{
+    HKEY        PnpKey;
+    DWORD       Value = 0;
+    HRESULT     Error;
+
+    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+                         PNP_KEY,
+                         0,
+                         KEY_ALL_ACCESS,
+                         &PnpKey);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail1;
+    }
+
+    Error = RegSetValueEx(PnpKey,
+                          "DisableCDDB",
+                          0,
+                          REG_DWORD,
+                          (LPBYTE)&Value,
+                          (DWORD)sizeof(DWORD));
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail2;
+    }
+
+    Error = RegSetValueEx(PnpKey,
+                          "DontStartRawDevices",
+                          0,
+                          REG_DWORD,
+                          (LPBYTE)&Value,
+                          (DWORD)sizeof(DWORD));
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail3;
+    }
+
+    RegCloseKey(PnpKey);
+
+    return TRUE;
+
+fail3:
+    Log("fail3");
+
+fail2:
+    Log("fail2");
+
+    RegCloseKey(PnpKey);
 
 fail1:
     Error = GetLastError();
@@ -526,8 +593,10 @@ __DifInstallPostProcess(
     if (!Success)
         goto fail3;
 
-    if (Count == 1)
+    if (Count == 1) {
+        ModifyBootGPO();
         (VOID) RequestReboot(DeviceInfoSet, DeviceInfoData);
+    }
 
     return NO_ERROR;
 
