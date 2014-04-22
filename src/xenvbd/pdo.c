@@ -562,11 +562,12 @@ fail1:
 
 VOID
 PdoDestroy(
-    __in PXENVBD_PDO             Pdo
+    __in PXENVBD_PDO    Pdo
     )
 {
-    const ULONG TargetId = PdoGetTargetId(Pdo);
-    PVOID       Objects[4];
+    const ULONG         TargetId = PdoGetTargetId(Pdo);
+    PVOID               Objects[4];
+    PKWAIT_BLOCK        WaitBlock;
 
     Trace("Target[%d] @ (%d) =====>\n", TargetId, KeGetCurrentIrql());
     Verbose("Target[%d] : Destroying\n", TargetId);
@@ -585,7 +586,31 @@ PdoDestroy(
     Objects[1] = &Pdo->RequestList.Empty;
     Objects[2] = &Pdo->SegmentList.Empty;
     Objects[3] = &Pdo->MappingList.Empty;
-    KeWaitForMultipleObjects(4, Objects, WaitAll, Executive, KernelMode, FALSE, NULL, NULL);
+
+    WaitBlock = (PKWAIT_BLOCK)__PdoAlloc(sizeof(KWAIT_BLOCK) * ARRAYSIZE(Objects));
+    if (WaitBlock == NULL) {
+        ULONG   Index;
+
+        Error("Unable to allocate resources for KWAIT_BLOCK\n");
+
+        for (Index = 0; Index < ARRAYSIZE(Objects); Index++)
+            KeWaitForSingleObject(Objects[Index],
+                                  Executive,
+                                  KernelMode,
+                                  FALSE,
+                                  NULL);
+    } else {
+        KeWaitForMultipleObjects(ARRAYSIZE(Objects),
+                                 Objects,
+                                 WaitAll,
+                                 Executive,
+                                 KernelMode,
+                                 FALSE,
+                                 NULL,
+                                 WaitBlock);
+        __PdoFree(WaitBlock);
+    }
+
     ASSERT3S(Pdo->ReferenceCount, ==, 0);
     ASSERT3U(PdoGetDevicePnpState(Pdo), ==, Deleted);
 
