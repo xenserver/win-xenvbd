@@ -40,7 +40,6 @@
 #include <stdlib.h>
 #include <xenvbd-ntstrsafe.h>
 
-#define MAX_OUTSTANDING_REQUESTS    256
 #define TAG_HEADER                  'gaTX'
 
 struct _XENVBD_BLOCKRING {
@@ -60,7 +59,6 @@ struct _XENVBD_BLOCKRING {
     ULONG                           Outstanding;
     ULONG                           Submitted;
     ULONG                           Recieved;
-    PXENVBD_REQUEST                 Tags[MAX_OUTSTANDING_REQUESTS];
 };
 
 #define MAX_NAME_LEN                64
@@ -118,56 +116,28 @@ __BlockRingGetTag(
     IN  PXENVBD_REQUEST             Request
     )
 {
-    USHORT      Index;
-
-    for (Index = 0; Index < MAX_OUTSTANDING_REQUESTS; ++Index) {
-        if (BlockRing->Tags[Index] == NULL) {
-            BlockRing->Tags[Index] = Request;
-
-            ++Index; // Tag value of 0 is invalid - make tags 1-based
-            return (((ULONG64)TAG_HEADER << 32) | ((ULONG64)Index << 16) | (ULONG64)Index);
-        }
-    }
-
-    Error("GET_TAG - out of free tags\n");
-    return ((ULONG64)TAG_HEADER << 32) | 0xFFFFFFFF;
+    UNREFERENCED_PARAMETER(BlockRing);
+    return ((ULONG64)TAG_HEADER << 32) | (ULONG64)Request->Id;
 }
 
-static FORCEINLINE PXENVBD_REQUEST
+static FORCEINLINE BOOLEAN
 __BlockRingPutTag(
     IN  PXENVBD_BLOCKRING           BlockRing,
-    IN  ULONG64                     Tag
+    IN  ULONG64                     Id,
+    OUT PULONG                      Tag
     )
 {
-    PXENVBD_REQUEST Request;
-    ULONG           Header;
-    USHORT          Tag1, Tag2;
+    ULONG   Header = (ULONG)((Id >> 32) & 0xFFFFFFFF);
 
-    Header  = (ULONG)((Tag >> 32) & 0xFFFFFFFF);
-    Tag1    = (USHORT)((Tag >> 16) & 0xFFFF);
-    Tag2    = (USHORT)(Tag & 0xFFFF);
+    UNREFERENCED_PARAMETER(BlockRing);
 
+    *Tag    = (ULONG)(Id & 0xFFFFFFFF);
     if (Header != TAG_HEADER) {
-        Error("PUT_TAG (%llx) TAG_HEADER (%08x%04x%04x)\n", Tag, Header, Tag1, Tag2);
-        return NULL;
-    }
-    if (Tag1 != Tag2) {
-        Error("PUT_TAG (%llx) Tag1 != Tag2 (%08x%04x%04x)\n", Tag, Header, Tag1, Tag2);
-        return NULL;
-    }
-    if (Tag1 == 0) {
-        Error("PUT_TAG (%llx) Tag1 == 0 (%08x%04x%04x)\n", Tag, Header, Tag1, Tag2);
-        return NULL;
-    }
-    if (Tag1 > MAX_OUTSTANDING_REQUESTS) {
-        Error("PUT_TAG (%llx) Tag1 > %x (%08x%04x%04x)\n", Tag, MAX_OUTSTANDING_REQUESTS, Header, Tag1, Tag2);
-        return NULL;
+        Error("PUT_TAG (%llx) TAG_HEADER (%08x%08x)\n", Id, Header, *Tag);
+        return FALSE;
     }
 
-    Request = BlockRing->Tags[Tag1 - 1];
-    BlockRing->Tags[Tag1 - 1] = NULL;
-
-    return Request;
+    return TRUE;
 }
 
 static FORCEINLINE VOID
@@ -521,16 +491,15 @@ BlockRingPoll(
 
         while (rsp_cons != rsp_prod) {
             blkif_response_t*   Response;
-            PXENVBD_REQUEST     Request;
+            ULONG               Tag;
 
             Response = RING_GET_RESPONSE(&BlockRing->FrontRing, rsp_cons);
             ++rsp_cons;
 
-            Request = __BlockRingPutTag(BlockRing, Response->id);
-            if (Request) {
+            if (__BlockRingPutTag(BlockRing, Response->id, &Tag)) {
                 ++BlockRing->Recieved;
                 --BlockRing->Outstanding;
-                PdoCompleteSubmitted(Pdo, Request, Response->status);
+                PdoCompleteSubmitted(Pdo, Tag, Response->status);
             }
 
             RtlZeroMemory(Response, sizeof(union blkif_sring_entry));

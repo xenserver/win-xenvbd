@@ -82,6 +82,7 @@ typedef struct _XENVBD_REQUEST_INDIRECT {
 typedef struct _XENVBD_REQUEST {
     PSCSI_REQUEST_BLOCK Srb;
     LIST_ENTRY          Entry;
+    ULONG               Id; // atomically increasing number
 
     UCHAR               Operation;
     union _XENVBD_REQUEST_TYPE {

@@ -105,6 +105,7 @@ struct _XENVBD_PDO {
     XENVBD_QUEUE                PreparedReqs;
     XENVBD_QUEUE                SubmittedReqs;
     XENVBD_QUEUE                ShutdownSrbs;
+    ULONG                       NextTag;
 
     // Stats - SRB Counts by BLKIF_OP_
     ULONG                       BlkOpRead;
@@ -828,6 +829,40 @@ PdoSectorSize(
 
 //=============================================================================
 
+static FORCEINLINE ULONG
+PdoGetTag(
+    IN  PXENVBD_PDO             Pdo
+    )
+{
+    return (ULONG)InterlockedIncrement((PLONG)&Pdo->NextTag);
+}
+
+static FORCEINLINE PXENVBD_REQUEST
+PdoPutTag(
+    IN  PXENVBD_PDO             Pdo,
+    IN  ULONG                   Tag
+    )
+{
+    KIRQL           Irql;
+    PLIST_ENTRY     Entry;
+    PXENVBD_QUEUE   Queue = &Pdo->SubmittedReqs;
+
+    KeAcquireSpinLock(&Queue->Lock, &Irql);
+
+    for (Entry = Queue->List.Flink; Entry != &Queue->List; Entry = Entry->Flink) {
+        PXENVBD_REQUEST Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        if (Request->Id == Tag) {
+            RemoveEntryList(&Request->Entry);
+            --Queue->Current;
+            KeReleaseSpinLock(&Queue->Lock, Irql);
+            return Request;
+        }
+    }
+
+    KeReleaseSpinLock(&Queue->Lock, Irql);
+    return NULL;
+}
+
 static FORCEINLINE VOID
 __PdoIncBlkifOpCount(
     __in PXENVBD_PDO             Pdo,
@@ -1393,7 +1428,8 @@ PrepareReadWrite(
         if (Request == NULL) 
             goto fail;
         
-        Request->Srb        = Srb;
+        Request->Srb    = Srb;
+        Request->Id     = PdoGetTag(Pdo);
         InsertTailList(&ReqList, &Request->Entry);
         InterlockedIncrement(&SrbExt->Count);
 
@@ -1465,8 +1501,9 @@ PrepareSyncCache(
     // mark the SRB as pending, completion will check for pending to detect failures
     Srb->SrbStatus = SRB_STATUS_PENDING;
 
-    Request->Srb = Srb;
-    Request->Operation      = BLKIF_OP_WRITE_BARRIER;
+    Request->Srb        = Srb;
+    Request->Id         = PdoGetTag(Pdo);
+    Request->Operation  = BLKIF_OP_WRITE_BARRIER;
 
     Request->u.Barrier.FirstSector = Cdb_LogicalBlock(Srb);
 
@@ -1491,8 +1528,9 @@ PrepareUnmap(
     // mark the SRB as pending, completion will check for pending to detect failures
     Srb->SrbStatus = SRB_STATUS_PENDING;
 
-    Request->Srb = Srb;
-    Request->Operation      = BLKIF_OP_DISCARD;
+    Request->Srb        = Srb;
+    Request->Id         = PdoGetTag(Pdo);
+    Request->Operation  = BLKIF_OP_DISCARD;
 
     Request->u.Discard.FirstSector = Cdb_LogicalBlock(Srb);
     Request->u.Discard.NrSectors   = Cdb_TransferBlock(Srb);
@@ -1576,12 +1614,20 @@ PdoSubmitPrepared(
 VOID
 PdoCompleteSubmitted(
     __in PXENVBD_PDO             Pdo,
-    __in PXENVBD_REQUEST         Request,
+    __in ULONG                   Tag,
     __in SHORT                   Status
     )
 {
-    PSCSI_REQUEST_BLOCK Srb = Request->Srb;
-    PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
+    PXENVBD_REQUEST     Request;
+    PSCSI_REQUEST_BLOCK Srb;
+    PXENVBD_SRBEXT      SrbExt;
+
+    Request = PdoPutTag(Pdo, Tag);
+    if (Request == NULL)
+        return;
+
+    Srb     = Request->Srb;
+    SrbExt  = GetSrbExt(Srb);
     ASSERT3P(SrbExt, !=, NULL);
 
     switch (Status) {
@@ -1605,7 +1651,6 @@ PdoCompleteSubmitted(
         break;
     }
 
-    QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
     RequestCleanup(Pdo, Request);
     __LookasideFree(&Pdo->RequestList, Request);
 
