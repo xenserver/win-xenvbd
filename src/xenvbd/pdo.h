@@ -190,7 +190,7 @@ PdoSubmitPrepared(
 extern VOID
 PdoCompleteSubmitted(
     __in PXENVBD_PDO             Pdo,
-    __in PXENVBD_REQUEST         Request,
+    __in ULONG                   Tag,
     __in SHORT                   Status
     );
 
