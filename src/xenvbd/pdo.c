@@ -1611,6 +1611,23 @@ PdoSubmitPrepared(
     }
 }
 
+static FORCEINLINE PCHAR
+BlkifOperationName(
+    IN  UCHAR                   Operation
+    )
+{
+    switch (Operation) {
+    case BLKIF_OP_READ:             return "READ";
+    case BLKIF_OP_WRITE:            return "WRITE";
+    case BLKIF_OP_WRITE_BARRIER:    return "WRITE_BARRIER";
+    case BLKIF_OP_FLUSH_DISKCACHE:  return "FLUSH_DISKCACHE";
+    case BLKIF_OP_RESERVED_1:       return "RESERVED_1";
+    case BLKIF_OP_DISCARD:          return "DISCARD";
+    case BLKIF_OP_INDIRECT:         return "INDIRECT";
+    default:                        return "<unknown>";
+    }
+}
+
 VOID
 PdoCompleteSubmitted(
     __in PXENVBD_PDO             Pdo,
@@ -1640,13 +1657,13 @@ PdoCompleteSubmitted(
         FrontendRemoveFeature(Pdo->Frontend, Request->Operation);
         Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
         Warning("Target[%d] : %s BLKIF_RSP_EOPNOTSUPP\n", 
-                PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation));
+                PdoGetTargetId(Pdo), BlkifOperationName(Request->Operation));
         break;
 
     case BLKIF_RSP_ERROR:
     default:
         Warning("Target[%d] : %s BLKIF_RSP_ERROR\n", 
-                PdoGetTargetId(Pdo), Cdb_OperationName(Request->Operation));
+                PdoGetTargetId(Pdo), BlkifOperationName(Request->Operation));
         Srb->SrbStatus = SRB_STATUS_ERROR;
         break;
     }
