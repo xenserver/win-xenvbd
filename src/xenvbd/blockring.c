@@ -66,8 +66,6 @@ struct _XENVBD_BLOCKRING {
 
 #define XEN_IO_PROTO_ABI    "x86_64-abi"
 
-extern PHYSICAL_ADDRESS MmGetPhysicalAddress(IN PVOID Buffer);
-
 static FORCEINLINE PVOID
 __BlockRingAllocate(
     IN  ULONG                       Length
