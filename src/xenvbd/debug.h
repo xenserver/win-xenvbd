@@ -35,6 +35,10 @@
 #include <ntddk.h>
 #include <stdarg.h>
 
+#ifdef  _SDV_
+#define __MODULE__ ""
+#endif
+
 // DEBUG_FILTER_MASKs
 // Set these to see relevant output
 // ERROR        0x00000001

@@ -29,7 +29,7 @@
  * SUCH DAMAGE.
  */ 
 
-#include "pdo-inquiry.h"
+#include "pdoinquiry.h"
 #include "driver.h"
 #include "debug.h"
 #include "assert.h"

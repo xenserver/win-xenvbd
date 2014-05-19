@@ -32,7 +32,7 @@
 #ifndef _XENVBD_QUEUE_H
 #define _XENVBD_QUEUE_H
 
-#include <wdm.h>
+#include <ntddk.h>
 #include <debug_interface.h>
 
 typedef struct _XENVBD_QUEUE {

@@ -32,7 +32,7 @@
 #ifndef _XENVBD_SRBEXT_H
 #define _XENVBD_SRBEXT_H
 
-#include <wdm.h>
+#include <ntddk.h>
 #include <xenvbd-storport.h>
 #include <xen.h>
 #include "assert.h"

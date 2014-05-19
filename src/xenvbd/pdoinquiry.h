@@ -32,7 +32,7 @@
 #ifndef _XENVBD_PDO_INQUIRY_H
 #define _XENVBD_PDO_INQUIRY_H
 
-#include <wdm.h>
+#include <ntddk.h>
 #include <xenvbd-storport.h>
 #include "frontend.h"
 

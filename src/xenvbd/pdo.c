@@ -36,7 +36,7 @@
 #include "queue.h"
 #include "srbext.h"
 #include "buffer.h"
-#include "pdo-inquiry.h"
+#include "pdoinquiry.h"
 #include "debug.h"
 #include "assert.h"
 #include "util.h"

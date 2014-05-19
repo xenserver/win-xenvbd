@@ -32,7 +32,7 @@
 #include "frontend.h"
 #include "driver.h"
 #include "fdo.h"
-#include "pdo-inquiry.h"
+#include "pdoinquiry.h"
 #include "srbext.h"
 #include "debug.h"
 #include "assert.h"
