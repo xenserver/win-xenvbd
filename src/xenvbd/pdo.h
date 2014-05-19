@@ -34,7 +34,7 @@
 
 typedef struct _XENVBD_PDO XENVBD_PDO, *PXENVBD_PDO;
 
-#include <wdm.h>
+#include <ntddk.h>
 #include <xenvbd-storport.h>
 #include "fdo.h"
 #include "srbext.h"

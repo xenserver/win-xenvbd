@@ -339,7 +339,7 @@ BlockRingStoreWrite(
         RingPages = (1 << BlockRing->Order);
         for (Index = 0; Index < RingPages; ++Index) {
             CHAR    Name[MAX_NAME_LEN+1];
-            status = RtlStringCchPrintfA(Name, MAX_NAME_LEN, "ring-ref%d", Index);
+            status = RtlStringCchPrintfA(Name, MAX_NAME_LEN, "ring-ref%u", Index);
             if (!NT_SUCCESS(status))
                 return status;
             status = STORE(Printf, 

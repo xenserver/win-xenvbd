@@ -384,6 +384,7 @@ __ScsiAdapterControlTypeName(
     default:                                return "UNKNOWN";
     }
 }
+
 static FORCEINLINE PCHAR
 __ScsiAdapterControlStatus(
     __in SCSI_ADAPTER_CONTROL_STATUS Status
@@ -396,6 +397,8 @@ __ScsiAdapterControlStatus(
     }
 }
 
+HW_INITIALIZE       HwInitialize;
+
 BOOLEAN 
 HwInitialize(
     __in PVOID   HwDeviceExtension
@@ -405,6 +408,8 @@ HwInitialize(
     return TRUE;
 }
 
+HW_INTERRUPT        HwInterrupt;
+
 BOOLEAN 
 HwInterrupt(
     __in PVOID   HwDeviceExtension
@@ -413,6 +418,8 @@ HwInterrupt(
     UNREFERENCED_PARAMETER(HwDeviceExtension);
     return TRUE;
 }
+
+HW_RESET_BUS        HwResetBus;
 
 BOOLEAN 
 HwResetBus(
@@ -427,6 +434,8 @@ HwResetBus(
     return RetVal;
 }
 
+HW_ADAPTER_CONTROL  HwAdapterControl;
+
 SCSI_ADAPTER_CONTROL_STATUS
 HwAdapterControl(
     __in PVOID                       HwDeviceExtension,
@@ -440,6 +449,8 @@ HwAdapterControl(
     Trace("(0x%p, %s, 0x%p) @%d <--- %s\n", HwDeviceExtension, __ScsiAdapterControlTypeName(ControlType), Parameters, KeGetCurrentIrql(), __ScsiAdapterControlStatus(RetVal));
     return RetVal;
 }
+
+HW_FIND_ADAPTER     HwFindAdapter;
 
 ULONG
 HwFindAdapter(
@@ -477,6 +488,9 @@ __FailStorageRequest(
 
     return FALSE;
 }
+
+HW_BUILDIO          HwBuildIo;
+
 BOOLEAN 
 HwBuildIo(
     __in PVOID               HwDeviceExtension,
@@ -488,6 +502,8 @@ HwBuildIo(
 
     return FdoBuildIo((PXENVBD_FDO)HwDeviceExtension, Srb);
 }
+
+HW_STARTIO          HwStartIo;
 
 BOOLEAN 
 HwStartIo(
@@ -503,12 +519,10 @@ HwStartIo(
 
 //=============================================================================
 // Driver Redirections
+extern PULONG       InitSafeBootMode;
+
 __drv_dispatchType(IRP_MJ_PNP)
 DRIVER_DISPATCH             DispatchPnp;
-__drv_dispatchType(IRP_MJ_POWER)
-DRIVER_DISPATCH             DispatchPower;
-DRIVER_UNLOAD               DriverUnload;
-DRIVER_INITIALIZE           DriverEntry;
 
 NTSTATUS 
 DispatchPnp(
@@ -545,6 +559,9 @@ DispatchPnp(
 
     return Status;
 }
+
+__drv_dispatchType(IRP_MJ_POWER)
+DRIVER_DISPATCH             DispatchPower;
 
 NTSTATUS 
 DispatchPower(
@@ -583,6 +600,8 @@ DispatchPower(
     return Status;
 }
 
+DRIVER_UNLOAD               DriverUnload;
+
 VOID
 DriverUnload(
     IN PDRIVER_OBJECT  _DriverObject
@@ -598,10 +617,9 @@ DriverUnload(
     Trace("<=== (Irql=%d)\n", KeGetCurrentIrql());
 }
 
-extern PULONG       InitSafeBootMode;
+DRIVER_INITIALIZE           DriverEntry;
 
 NTSTATUS
-#pragma prefast(suppress:28101, "DriverEntry (XENVBD)")
 DriverEntry(
     IN PDRIVER_OBJECT  _DriverObject,
     IN PUNICODE_STRING RegistryPath
