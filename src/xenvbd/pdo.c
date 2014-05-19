@@ -931,8 +931,6 @@ __Phys2Pfn(
     return (PFN_NUMBER)(PhysAddr.QuadPart >> PAGE_SHIFT);
 }
 
-extern PHYSICAL_ADDRESS MmGetPhysicalAddress(PVOID);
-
 static FORCEINLINE PFN_NUMBER
 __Virt2Pfn(
     __in PVOID                   VirtAddr
