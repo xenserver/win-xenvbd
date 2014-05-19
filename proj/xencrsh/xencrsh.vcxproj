@@ -72,7 +72,7 @@
 		<ClCompile Include="..\..\src\xencrsh\hypercall_stub.c" />
 		<ClCompile Include="..\..\src\xencrsh\log.c" />
 		<ClCompile Include="..\..\src\xencrsh\pdo.c" />
-		<ClCompile Include="..\..\src\xencrsh\pdo-inquiry.c" />
+		<ClCompile Include="..\..\src\xencrsh\pdoinquiry.c" />
 		<ClCompile Include="..\..\src\xencrsh\queue.c" />
 		<ClCompile Include="..\..\src\xencrsh\store.c" />
 	</ItemGroup>

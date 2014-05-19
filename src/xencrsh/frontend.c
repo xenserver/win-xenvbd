@@ -33,7 +33,7 @@
 
 #include "driver.h"
 #include "fdo.h"
-#include "pdo-inquiry.h"
+#include "pdoinquiry.h"
 
 #include "austere.h"
 #include "store.h"
