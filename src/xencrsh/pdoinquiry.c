@@ -29,7 +29,7 @@
  * SUCH DAMAGE.
  */ 
 
-#include "pdo-inquiry.h"
+#include "pdoinquiry.h"
 
 #include "store.h"
 #include "austere.h"

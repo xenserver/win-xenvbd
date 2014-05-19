@@ -390,6 +390,7 @@ if __name__ == '__main__':
     symstore_add(driver, release, 'x64', debug[sys.argv[1]])
 
     if len(sys.argv) <= 2 or sdv[sys.argv[2]]:
+        run_sdv('xencrsh', driver)
         run_sdv('xenvbd', driver)
 
     archive(driver + '\\source.tgz', manifest().splitlines(), tgz=True)

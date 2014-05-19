@@ -138,6 +138,8 @@ DriverFormat(
 
 //=============================================================================
 // StorPort redirections
+HW_INITIALIZE       HwInitialize;
+
 BOOLEAN 
 HwInitialize(
     IN  PVOID   HwDeviceExtension
@@ -146,6 +148,8 @@ HwInitialize(
     UNREFERENCED_PARAMETER(HwDeviceExtension);
     return TRUE;
 }
+
+HW_INTERRUPT        HwInterrupt;
 
 BOOLEAN 
 HwInterrupt(
@@ -160,6 +164,8 @@ HwInterrupt(
     return TRUE;
 }
 
+HW_RESET_BUS        HwResetBus;
+
 BOOLEAN 
 HwResetBus(
     IN  PVOID   HwDeviceExtension,
@@ -170,6 +176,8 @@ HwResetBus(
     return FdoResetBus((PXENVBD_FDO)HwDeviceExtension);
 }
 
+HW_ADAPTER_CONTROL  HwAdapterControl;
+
 SCSI_ADAPTER_CONTROL_STATUS
 HwAdapterControl(
     IN  PVOID                       HwDeviceExtension,
@@ -179,6 +187,8 @@ HwAdapterControl(
 {
     return FdoAdapterControl((PXENVBD_FDO)HwDeviceExtension, ControlType, Parameters);
 }
+
+HW_FIND_ADAPTER     HwFindAdapter;
 
 ULONG
 HwFindAdapter(
@@ -198,6 +208,8 @@ HwFindAdapter(
     return FdoFindAdapter((PXENVBD_FDO)HwDeviceExtension, ConfigInfo);
 }
 
+HW_BUILDIO          HwBuildIo;
+
 BOOLEAN 
 HwBuildIo(
     IN  PVOID               HwDeviceExtension,
@@ -206,6 +218,8 @@ HwBuildIo(
 {
     return FdoBuildIo((PXENVBD_FDO)HwDeviceExtension, Srb);
 }
+
+HW_STARTIO          HwStartIo;
 
 BOOLEAN 
 HwStartIo(
@@ -284,6 +298,7 @@ __ToUpper(
         return Ch - L'a' + L'A';
     return Ch;
 }
+
 static FORCEINLINE BOOLEAN
 __StrStarts(
     IN  PWCHAR  Str,
@@ -298,6 +313,7 @@ __StrStarts(
     }
     return TRUE;
 }
+
 NTSTATUS
 DllInitialize(
     IN  PUNICODE_STRING RegistryPath
@@ -323,6 +339,7 @@ DllInitialize(
     LogTrace("<=== (%08x)\n", Status);
     return Status;
 }
+
 NTSTATUS
 DllUnload(
     VOID
@@ -343,4 +360,14 @@ DriverEntry(
     UNREFERENCED_PARAMETER(RegistryPath);
 
     return STATUS_SUCCESS;
+}
+
+DRIVER_UNLOAD               DriverUnload;
+
+VOID
+DriverUnload(
+    IN PDRIVER_OBJECT  _DriverObject
+    )
+{
+    UNREFERENCED_PARAMETER(_DriverObject);
 }
