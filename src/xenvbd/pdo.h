@@ -178,25 +178,15 @@ PdoSectorSize(
 
 // Queue-Related
 extern VOID
-PdoPrepareFresh(
+PdoSubmitRequests(
     __in PXENVBD_PDO             Pdo
     );
 
 extern VOID
-PdoSubmitPrepared(
-    __in PXENVBD_PDO             Pdo
-    );
-
-extern VOID
-PdoCompleteSubmitted(
+PdoCompleteResponse(
     __in PXENVBD_PDO             Pdo,
     __in ULONG                   Tag,
     __in SHORT                   Status
-    );
-
-extern VOID
-PdoCompleteShutdown(
-    __in PXENVBD_PDO             Pdo
     );
 
 extern VOID

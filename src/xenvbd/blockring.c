@@ -497,7 +497,7 @@ BlockRingPoll(
             if (__BlockRingPutTag(BlockRing, Response->id, &Tag)) {
                 ++BlockRing->Recieved;
                 --BlockRing->Outstanding;
-                PdoCompleteSubmitted(Pdo, Tag, Response->status);
+                PdoCompleteResponse(Pdo, Tag, Response->status);
             }
 
             RtlZeroMemory(Response, sizeof(union blkif_sring_entry));

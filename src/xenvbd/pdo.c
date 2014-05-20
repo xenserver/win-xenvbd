@@ -1541,7 +1541,7 @@ PrepareUnmap(
 
 //=============================================================================
 // Queue-Related
-VOID
+static FORCEINLINE VOID
 PdoPrepareFresh(
     __in PXENVBD_PDO             Pdo
     )
@@ -1580,7 +1580,7 @@ PdoPrepareFresh(
     }
 }
 
-VOID
+static FORCEINLINE VOID
 PdoSubmitPrepared(
     __in PXENVBD_PDO             Pdo
     )
@@ -1609,6 +1609,30 @@ PdoSubmitPrepared(
     }
 }
 
+static FORCEINLINE VOID
+PdoCompleteShutdown(
+    __in PXENVBD_PDO             Pdo
+    )
+{
+    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
+        return;
+
+    if (QueueCount(&Pdo->FreshSrbs) ||
+        QueueCount(&Pdo->PreparedReqs) ||
+        QueueCount(&Pdo->SubmittedReqs))
+        return;
+
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
+        if (Entry == NULL)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
+        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
+    }
+}
+
 static FORCEINLINE PCHAR
 BlkifOperationName(
     IN  UCHAR                   Operation
@@ -1627,7 +1651,17 @@ BlkifOperationName(
 }
 
 VOID
-PdoCompleteSubmitted(
+PdoSubmitRequests(
+    __in PXENVBD_PDO             Pdo
+    )
+{
+    PdoPrepareFresh(Pdo);
+    PdoSubmitPrepared(Pdo);
+    PdoCompleteShutdown(Pdo);
+}
+
+VOID
+PdoCompleteResponse(
     __in PXENVBD_PDO             Pdo,
     __in ULONG                   Tag,
     __in SHORT                   Status
@@ -1682,30 +1716,6 @@ PdoCompleteSubmitted(
         }
 
         FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
-    }
-}
-
-VOID
-PdoCompleteShutdown(
-    __in PXENVBD_PDO             Pdo
-    )
-{
-    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
-        return;
-
-    if (QueueCount(&Pdo->FreshSrbs) ||
-        QueueCount(&Pdo->PreparedReqs) ||
-        QueueCount(&Pdo->SubmittedReqs))
-        return;
-
-    for (;;) {
-        PXENVBD_SRBEXT  SrbExt;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
-        if (Entry == NULL)
-            break;
-        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
-        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
-        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
     }
 }
 
