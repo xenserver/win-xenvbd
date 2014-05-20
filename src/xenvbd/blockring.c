@@ -419,10 +419,11 @@ BlockRingDebugCallback(
     IN  PXENBUS_DEBUG_CALLBACK      Callback
     )
 {
-    ULONG   Index;
+    ULONG           Index;
+    PXENVBD_GRANTER Granter = FrontendGetGranter(BlockRing->Frontend);
 
     DEBUG(Printf, Debug, Callback,
-            "BLOCKRING: Requests : %d / %d / %d\n", 
+            "BLOCKRING: Requests  : %d / %d / %d\n",
             BlockRing->Outstanding,
             BlockRing->Submitted,
             BlockRing->Recieved);
@@ -434,25 +435,27 @@ BlockRingDebugCallback(
     if (BlockRing->SharedRing) {
         DEBUG(Printf, Debug, Callback,
                 "BLOCKRING: SharedRing : %d / %d - %d / %d\n",
-                BlockRing->SharedRing->req_prod, 
-                BlockRing->SharedRing->req_event, 
-                BlockRing->SharedRing->rsp_prod, 
+                BlockRing->SharedRing->req_prod,
+                BlockRing->SharedRing->req_event,
+                BlockRing->SharedRing->rsp_prod,
                 BlockRing->SharedRing->rsp_event);
     }
 
     DEBUG(Printf, Debug, Callback,
-            "BLOCKRING: FrontRing : %d / %d (%d)\n", 
+            "BLOCKRING: FrontRing  : %d / %d (%d)\n",
             BlockRing->FrontRing.req_prod_pvt,
-            BlockRing->FrontRing.rsp_cons, 
+            BlockRing->FrontRing.rsp_cons,
             BlockRing->FrontRing.nr_ents);
 
     DEBUG(Printf, Debug, Callback,
-            "BLOCKRING: Order : %d\n", 
+            "BLOCKRING: Order      : %d\n",
             BlockRing->Order);
     for (Index = 0; Index < (1ul << BlockRing->Order); ++Index) {
         DEBUG(Printf, Debug, Callback,
-                "BLOCKRING: Grants[%-2d] : %d\n", 
-                Index, BlockRing->Grants[Index]);
+                "BLOCKRING: Grants[%-2d] : 0x%p (%u)\n", 
+                Index,
+                BlockRing->Grants[Index],
+                GranterReference(Granter, BlockRing->Grants[Index]));
     }
 
     BlockRing->Submitted = BlockRing->Recieved = 0;

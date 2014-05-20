@@ -233,7 +233,7 @@ __LookasideDebug(
     )
 {
     DEBUG(Printf, Debug, Callback,
-          "PDO: %s: %u / %u (%u failed)\n",
+          "LOOKASIDE: %s: %u / %u (%u failed)\n",
           Name, Lookaside->Used,
           Lookaside->Max, Lookaside->Failed);
 
@@ -314,11 +314,12 @@ PdoDebugCallback(
     __LookasideDebug(&Pdo->SegmentList, DebugInterface, DebugCallback, "SEGMENTs");
     __LookasideDebug(&Pdo->MappingList, DebugInterface, DebugCallback, "MAPPINGs");
 
-    FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->FreshSrbs,    "Fresh    ", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->PreparedReqs, "Prepared ", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown ", DebugInterface, DebugCallback);
+
+    FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
 
     Pdo->BlkOpRead = Pdo->BlkOpWrite = 0;
     Pdo->BlkOpIndirectRead = Pdo->BlkOpIndirectWrite = 0;
@@ -862,6 +863,7 @@ PdoPutTag(
     }
 
     KeReleaseSpinLock(&Queue->Lock, Irql);
+    Warning("Target[%d] : Tag %x not found in submitted list\n", PdoGetTargetId(Pdo), Tag);
     return NULL;
 }
 
