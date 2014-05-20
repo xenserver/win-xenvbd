@@ -521,6 +521,7 @@ BlockRingSubmit(
 {
     KIRQL               Irql;
     blkif_request_t*    req;
+    BOOLEAN             Notify;
 
     KeAcquireSpinLock(&BlockRing->Lock, &Irql);
     if (RING_FULL(&BlockRing->FrontRing)) {
@@ -533,19 +534,11 @@ BlockRingSubmit(
     KeMemoryBarrier();
     ++BlockRing->FrontRing.req_prod_pvt;
 
+    RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&BlockRing->FrontRing, Notify);
     KeReleaseSpinLock(&BlockRing->Lock, Irql);
+
+    if (Notify)
+        NotifierSend(FrontendGetNotifier(BlockRing->Frontend));
+
     return TRUE;
 }
-
-BOOLEAN
-BlockRingPush(
-    IN  PXENVBD_BLOCKRING           BlockRing
-    )
-{
-    BOOLEAN Notify;
-
-    RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&BlockRing->FrontRing, Notify);
-    
-    return Notify;
-}
-

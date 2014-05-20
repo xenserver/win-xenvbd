@@ -1588,7 +1588,6 @@ PdoSubmitPrepared(
     )
 {
     PXENVBD_BLOCKRING   BlockRing = FrontendGetBlockRing(Pdo->Frontend);
-    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     for (;;) {
         PXENVBD_REQUEST Request;
@@ -1604,10 +1603,6 @@ PdoSubmitPrepared(
             QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
             break;
         }
-    }
-
-    if (BlockRingPush(BlockRing)) {
-        NotifierSend(Notifier);
     }
 }
 
