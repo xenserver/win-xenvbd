@@ -158,6 +158,90 @@ __PdoFree(
 }
 
 //=============================================================================
+// Lookasides
+static FORCEINLINE VOID
+__LookasideInit(
+    IN OUT  PXENVBD_LOOKASIDE   Lookaside,
+    IN  ULONG                   Size,
+    IN  ULONG                   Tag
+    )
+{
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
+    Lookaside->Size = Size;
+    KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
+    ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
+                                    Size, Tag, 0);
+}
+
+static FORCEINLINE VOID
+__LookasideTerm(
+    IN  PXENVBD_LOOKASIDE       Lookaside
+    )
+{
+    ASSERT3U(Lookaside->Used, ==, 0);
+    ExDeleteNPagedLookasideList(&Lookaside->List);
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
+}
+
+static FORCEINLINE PVOID
+__LookasideAlloc(
+    IN  PXENVBD_LOOKASIDE       Lookaside
+    )
+{
+    LONG    Result;
+    PVOID   Buffer;
+
+    Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
+    if (Buffer == NULL) {
+        ++Lookaside->Failed;
+        return NULL;
+    }
+
+    RtlZeroMemory(Buffer, Lookaside->Size);
+    Result = InterlockedIncrement(&Lookaside->Used);
+    ASSERT3S(Result, >, 0);
+    if (Result > Lookaside->Max)
+        Lookaside->Max = Result;
+    KeClearEvent(&Lookaside->Empty);
+
+    return Buffer;
+}
+
+static FORCEINLINE VOID
+__LookasideFree(
+    IN  PXENVBD_LOOKASIDE       Lookaside,
+    IN  PVOID                   Buffer
+    )
+{
+    LONG            Result;
+
+    ExFreeToNPagedLookasideList(&Lookaside->List, Buffer);
+    Result = InterlockedDecrement(&Lookaside->Used);
+    ASSERT3S(Result, >=, 0);
+        
+    if (Result == 0) {
+        KeSetEvent(&Lookaside->Empty, IO_NO_INCREMENT, FALSE);
+    }
+}
+
+static FORCEINLINE VOID
+__LookasideDebug(
+    IN  PXENVBD_LOOKASIDE           Lookaside,
+    IN  PXENBUS_DEBUG_INTERFACE     Debug,
+    IN  PXENBUS_DEBUG_CALLBACK      Callback,
+    IN  PCHAR                       Name
+    )
+{
+    DEBUG(Printf, Debug, Callback,
+          "PDO: %s: %u / %u (%u failed)\n",
+          Name, Lookaside->Used,
+          Lookaside->Max, Lookaside->Failed);
+
+    Lookaside->Max = Lookaside->Used;
+    Lookaside->Failed = 0;
+}
+
+//=============================================================================
 // Debug
 static FORCEINLINE PCHAR
 __PnpStateName(
@@ -177,23 +261,6 @@ __PnpStateName(
     case Deleted:               return "Deleted";
     default:                    return "UNKNOWN";
     }
-}
-
-static FORCEINLINE VOID
-__LookasideDebug(
-    IN  PXENVBD_LOOKASIDE           Lookaside,
-    IN  PXENBUS_DEBUG_INTERFACE     Debug,
-    IN  PXENBUS_DEBUG_CALLBACK      Callback,
-    IN  PCHAR                       Name
-    )
-{
-    DEBUG(Printf, Debug, Callback,
-          "PDO: %s: %u / %u (%u failed)\n",
-          Name, Lookaside->Used,
-          Lookaside->Max, Lookaside->Failed);
-
-    Lookaside->Max = Lookaside->Used;
-    Lookaside->Failed = 0;
 }
 
 DECLSPEC_NOINLINE VOID
@@ -412,71 +479,6 @@ __PdoUnpauseDataPath(
     KeAcquireSpinLock(&Pdo->Lock, &Irql);
     --Pdo->Paused;
     KeReleaseSpinLock(&Pdo->Lock, Irql);
-}
-
-static FORCEINLINE VOID
-__LookasideInit(
-    IN OUT  PXENVBD_LOOKASIDE   Lookaside,
-    IN  ULONG                   Size,
-    IN  ULONG                   Tag
-    )
-{
-    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
-    Lookaside->Size = Size;
-    KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
-    ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
-                                    Size, Tag, 0);
-}
-
-static FORCEINLINE VOID
-__LookasideTerm(
-    IN  PXENVBD_LOOKASIDE       Lookaside
-    )
-{
-    ASSERT3U(Lookaside->Used, ==, 0);
-    ExDeleteNPagedLookasideList(&Lookaside->List);
-    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
-}
-
-static FORCEINLINE PVOID
-__LookasideAlloc(
-    IN  PXENVBD_LOOKASIDE       Lookaside
-    )
-{
-    LONG    Result;
-    PVOID   Buffer;
-
-    Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
-    if (Buffer == NULL) {
-        ++Lookaside->Failed;
-        return NULL;
-    }
-
-    RtlZeroMemory(Buffer, Lookaside->Size);
-    Result = InterlockedIncrement(&Lookaside->Used);
-    ASSERT3S(Result, >, 0);
-    if (Result > Lookaside->Max)
-        Lookaside->Max = Result;
-    KeClearEvent(&Lookaside->Empty);
-
-    return Buffer;
-}
-
-static FORCEINLINE VOID
-__LookasideFree(
-    IN  PXENVBD_LOOKASIDE       Lookaside,
-    IN  PVOID                   Buffer
-    )
-{
-    LONG            Result;
-
-    ExFreeToNPagedLookasideList(&Lookaside->List, Buffer);
-    Result = InterlockedDecrement(&Lookaside->Used);
-    ASSERT3S(Result, >=, 0);
-        
-    if (Result == 0) {
-        KeSetEvent(&Lookaside->Empty, IO_NO_INCREMENT, FALSE);
-    }
 }
 
 //=============================================================================
