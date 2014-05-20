@@ -1543,46 +1543,46 @@ PrepareUnmap(
 
 //=============================================================================
 // Queue-Related
-static FORCEINLINE VOID
+static FORCEINLINE BOOLEAN
 PdoPrepareFresh(
     __in PXENVBD_PDO             Pdo
     )
 {
-    for (;;) {
-        NTSTATUS        Status;
-        PXENVBD_SRBEXT  SrbExt;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->FreshSrbs);
-        if (Entry == NULL)
-            break;
-        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+    NTSTATUS        Status;
+    PXENVBD_SRBEXT  SrbExt;
+    PLIST_ENTRY     Entry;
 
-        // popped a SRB, process it
-        switch (Cdb_OperationEx(SrbExt->Srb)) {
-        case SCSIOP_READ:
-        case SCSIOP_WRITE:
-            Status = PrepareReadWrite(Pdo, SrbExt->Srb);
-            break;
-        case SCSIOP_SYNCHRONIZE_CACHE:
-            Status = PrepareSyncCache(Pdo, SrbExt->Srb);
-            break;
-        case SCSIOP_UNMAP:
-            Status = PrepareUnmap(Pdo, SrbExt->Srb);
-            break;
-        default:
-            ASSERT(FALSE);
-            Status = STATUS_NOT_SUPPORTED;
-            break;
-        }
+    Entry = QueuePop(&Pdo->FreshSrbs);
+    if (Entry == NULL)
+        return FALSE;   // fresh queue is empty
 
-        // if failed to prepare, put on fresh and finish up
-        if (!NT_SUCCESS(Status)) {
-            QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
-            break;
-        }
+    SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+
+    switch (Cdb_OperationEx(SrbExt->Srb)) {
+    case SCSIOP_READ:
+    case SCSIOP_WRITE:
+        Status = PrepareReadWrite(Pdo, SrbExt->Srb);
+        break;
+    case SCSIOP_SYNCHRONIZE_CACHE:
+        Status = PrepareSyncCache(Pdo, SrbExt->Srb);
+        break;
+    case SCSIOP_UNMAP:
+        Status = PrepareUnmap(Pdo, SrbExt->Srb);
+        break;
+    default:
+        ASSERT(FALSE);
+        Status = STATUS_NOT_SUPPORTED;
+        break;
     }
+
+    if (NT_SUCCESS(Status))
+        return TRUE;    // prepared this SRB
+
+    QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
+    return FALSE;       // prepare failed
 }
 
-static FORCEINLINE VOID
+static FORCEINLINE BOOLEAN
 PdoSubmitPrepared(
     __in PXENVBD_PDO             Pdo
     )
@@ -1591,19 +1591,26 @@ PdoSubmitPrepared(
 
     for (;;) {
         PXENVBD_REQUEST Request;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->PreparedReqs);
+        PLIST_ENTRY     Entry;
+
+        Entry = QueuePop(&Pdo->PreparedReqs);
         if (Entry == NULL)
             break;
+
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
 
         QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
         KeMemoryBarrier();
-        if (!BlockRingSubmit(BlockRing, Request)) {
-            QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
-            QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
-            break;
-        }
+
+        if (BlockRingSubmit(BlockRing, Request))
+            continue;
+
+        QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
+        QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
+        return FALSE;   // ring full
     }
+
+    return TRUE;
 }
 
 static FORCEINLINE VOID
@@ -1652,8 +1659,21 @@ PdoSubmitRequests(
     __in PXENVBD_PDO             Pdo
     )
 {
-    PdoPrepareFresh(Pdo);
-    PdoSubmitPrepared(Pdo);
+    for (;;) {
+        // submit all prepared requests (0 or more requests)
+        // return TRUE if submitted 0 or more requests from prepared queue
+        // return FALSE iff ring is full
+        if (!PdoSubmitPrepared(Pdo))
+            break;
+
+        // prepare a single SRB (into 1 or more requests)
+        // return TRUE if prepare succeeded
+        // return FALSE if prepare failed or fresh queue empty
+        if (!PdoPrepareFresh(Pdo))
+            break;
+    }
+
+    // if no requests/SRBs outstanding, complete any shutdown SRBs
     PdoCompleteShutdown(Pdo);
 }
 
