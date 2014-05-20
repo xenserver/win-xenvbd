@@ -45,6 +45,8 @@ struct _XENVBD_GRANTER {
     PXENBUS_GNTTAB_INTERFACE        GnttabInterface;
 
     USHORT                          BackendDomain;
+    LONG                            Current;
+    LONG                            Maximum;
 };
 #define GRANTER_POOL_TAG            'tnGX'
 
@@ -159,6 +161,8 @@ GranterDisconnect(
 {
     ASSERT(Granter->Connected == TRUE);
 
+    ASSERT3S(Granter->Current, ==, 0);
+    Granter->Maximum = 0;
     Granter->BackendDomain = 0;
 
     GNTTAB(Release, Granter->GnttabInterface);
@@ -178,6 +182,11 @@ GranterDebugCallback(
         "GRANTER: %s %s\n", 
         Granter->Connected ? "CONNECTED" : "DISCONNECTED",
         Granter->Enabled ? "ENABLED" : "DISABLED");
+    DEBUG(Printf, Debug, Callback,
+        "GRANTER: %d / %d\n",
+        Granter->Current,
+        Granter->Maximum);
+    Granter->Maximum = Granter->Current;
 }
 
 NTSTATUS
@@ -190,6 +199,7 @@ GranterGet(
 {
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor;
     NTSTATUS                    status;
+    LONG                        Value;
 
     Descriptor = GNTTAB(Get, 
                         Granter->GnttabInterface);
@@ -207,6 +217,10 @@ GranterGet(
                     ReadOnly);
     ASSERT(NT_SUCCESS(status));
     
+    Value = InterlockedIncrement(&Granter->Current);
+    if (Value > Granter->Maximum)
+        Granter->Maximum = Value;
+
     *Handle = Descriptor;
     return STATUS_SUCCESS;
 
@@ -229,6 +243,8 @@ GranterPut(
     ASSERT(NT_SUCCESS(status));
 
     GNTTAB(Put, Granter->GnttabInterface, Descriptor);
+
+    InterlockedDecrement(&Granter->Current);
 }
 
 ULONG
