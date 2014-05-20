@@ -1844,7 +1844,6 @@ PdoReadWrite(
     __in PSCSI_REQUEST_BLOCK    Srb
     )
 {
-    NTSTATUS            Status;
     PXENVBD_DISKINFO    DiskInfo = FrontendGetDiskInfo(Pdo->Frontend);
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
@@ -1862,12 +1861,6 @@ PdoReadWrite(
         return TRUE; // Complete now
     }
 
-    Status = PrepareReadWrite(Pdo, Srb);
-    if (NT_SUCCESS(Status)) {
-        PdoSubmitPrepared(Pdo);
-        return FALSE;
-    }
-
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
     NotifierTrigger(Notifier);
 
@@ -1881,7 +1874,6 @@ PdoSyncCache(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    NTSTATUS            Status;
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
@@ -1898,12 +1890,6 @@ PdoSyncCache(
         return TRUE;
     }
 
-    Status = PrepareSyncCache(Pdo, Srb);
-    if (NT_SUCCESS(Status)) {
-        PdoSubmitPrepared(Pdo);
-        return FALSE;
-    }
-
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
     NotifierTrigger(Notifier);
 
@@ -1917,7 +1903,6 @@ PdoUnmap(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    NTSTATUS            Status;
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
@@ -1932,12 +1917,6 @@ PdoUnmap(
         Srb->ScsiStatus = 0x00; // SCSI_GOOD
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
         return TRUE;
-    }
-
-    Status = PrepareUnmap(Pdo, Srb);
-    if (NT_SUCCESS(Status)) {
-        PdoSubmitPrepared(Pdo);
-        return FALSE;
     }
 
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
