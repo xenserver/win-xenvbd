@@ -300,9 +300,7 @@ FrontendNotifyResponses(
     )
 {
     BlockRingPoll(Frontend->BlockRing);
-    PdoPrepareFresh(Frontend->Pdo);
-    PdoSubmitPrepared(Frontend->Pdo);
-    PdoCompleteShutdown(Frontend->Pdo);
+    PdoSubmitRequests(Frontend->Pdo);
 }
 
 //=============================================================================

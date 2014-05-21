@@ -112,23 +112,40 @@ __BufferFree(
 static DECLSPEC_NOINLINE BOOLEAN
 __IsOnList(
     IN  PLIST_ENTRY             ListHead,
-    IN  PLIST_ENTRY             ListItem
+    IN  PLIST_ENTRY             ListItem,
+    IN  BOOLEAN                 Locked
     )
 {
+    KIRQL       Irql;
     PLIST_ENTRY Entry;
+    BOOLEAN     Found = FALSE;
+
+    if (!Locked)
+        KeAcquireSpinLock(&__Buffer.Lock, &Irql);
+
+    ASSERT3P(ListHead, !=, NULL);
+    ASSERT3P(ListItem, !=, NULL);
+    ASSERT3P(ListHead->Flink, !=, NULL);
+    ASSERT3P(ListHead, !=, ListItem);
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
 
     for (Entry = ListHead->Flink; Entry != ListHead; Entry = Entry->Flink) {
         if (Entry == ListItem) {
-            return TRUE;
+            Found = TRUE;
+            break;
         }
     }
-    return FALSE;
+
+    if (!Locked)
+        KeReleaseSpinLock(&__Buffer.Lock, Irql);
+
+    return Found;
 }
 
 #ifdef DBG
-#define IsOnList(a, b)  __IsOnList(a, b)
+#define IsOnList(a, b, c)  __IsOnList(a, b, c)
 #else
-#define IsOnList(a, b)  (TRUE)
+#define IsOnList(a, b, c)  (TRUE)
 #endif
 
 static DECLSPEC_NOINLINE VOID
@@ -146,7 +163,7 @@ __BufferPushFreeList(
 }
 static DECLSPEC_NOINLINE PXENVBD_BUFFER
 __BufferPopFreeList(
-)
+    )
 {
     PLIST_ENTRY     Entry;
 
@@ -164,7 +181,7 @@ __BufferPopFreeList(
 static DECLSPEC_NOINLINE VOID
 __BufferPushUsedList(
     IN PXENVBD_BUFFER           BufferId
-)
+    )
 {
     ASSERT3P(BufferId->Entry.Flink, ==, NULL);
     ASSERT3P(BufferId->Entry.Blink, ==, NULL);
@@ -176,7 +193,7 @@ __BufferPushUsedList(
 }
 static DECLSPEC_NOINLINE PXENVBD_BUFFER
 __BufferPopUsedList(
-)
+    )
 {
     PLIST_ENTRY     Entry;
 
@@ -198,7 +215,7 @@ __BufferRemoveUsedList(
 {
     ASSERT3P(BufferId->Entry.Flink, !=, NULL);
     ASSERT3P(BufferId->Entry.Blink, !=, NULL);
-    ASSERT(IsOnList(&__Buffer.UsedList, &BufferId->Entry));
+    ASSERT(IsOnList(&__Buffer.UsedList, &BufferId->Entry, TRUE));
 
     RemoveEntryList(&BufferId->Entry);
     BufferId->Entry.Flink = NULL;
@@ -351,7 +368,7 @@ BufferCopyIn(
     ASSERT3U(Length, <=, PAGE_SIZE);
 
     ASSERT3P(BufferId->VAddr, !=, NULL);
-    ASSERT(IsOnList(&__Buffer.UsedList, &BufferId->Entry));
+    ASSERT(IsOnList(&__Buffer.UsedList, &BufferId->Entry, FALSE));
     RtlCopyMemory(BufferId->VAddr, Input, Length);
 }
 
@@ -369,7 +386,7 @@ BufferCopyOut(
     ASSERT3U(Length, <=, PAGE_SIZE);
 
     ASSERT3P(BufferId->VAddr, !=, NULL);
-    ASSERT(IsOnList(&__Buffer.UsedList, &BufferId->Entry));
+    ASSERT(IsOnList(&__Buffer.UsedList, &BufferId->Entry, FALSE));
     RtlCopyMemory(Output, BufferId->VAddr, Length);
 }
 

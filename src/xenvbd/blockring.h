@@ -95,9 +95,4 @@ BlockRingSubmit(
     IN  PXENVBD_REQUEST             Request
     );
 
-extern BOOLEAN
-BlockRingPush(
-    IN  PXENVBD_BLOCKRING           BlockRing
-    );
-
 #endif // _XENVBD_BLOCKRING_H

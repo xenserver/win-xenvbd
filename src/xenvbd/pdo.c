@@ -158,6 +158,90 @@ __PdoFree(
 }
 
 //=============================================================================
+// Lookasides
+static FORCEINLINE VOID
+__LookasideInit(
+    IN OUT  PXENVBD_LOOKASIDE   Lookaside,
+    IN  ULONG                   Size,
+    IN  ULONG                   Tag
+    )
+{
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
+    Lookaside->Size = Size;
+    KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
+    ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
+                                    Size, Tag, 0);
+}
+
+static FORCEINLINE VOID
+__LookasideTerm(
+    IN  PXENVBD_LOOKASIDE       Lookaside
+    )
+{
+    ASSERT3U(Lookaside->Used, ==, 0);
+    ExDeleteNPagedLookasideList(&Lookaside->List);
+    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
+}
+
+static FORCEINLINE PVOID
+__LookasideAlloc(
+    IN  PXENVBD_LOOKASIDE       Lookaside
+    )
+{
+    LONG    Result;
+    PVOID   Buffer;
+
+    Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
+    if (Buffer == NULL) {
+        ++Lookaside->Failed;
+        return NULL;
+    }
+
+    RtlZeroMemory(Buffer, Lookaside->Size);
+    Result = InterlockedIncrement(&Lookaside->Used);
+    ASSERT3S(Result, >, 0);
+    if (Result > Lookaside->Max)
+        Lookaside->Max = Result;
+    KeClearEvent(&Lookaside->Empty);
+
+    return Buffer;
+}
+
+static FORCEINLINE VOID
+__LookasideFree(
+    IN  PXENVBD_LOOKASIDE       Lookaside,
+    IN  PVOID                   Buffer
+    )
+{
+    LONG            Result;
+
+    ExFreeToNPagedLookasideList(&Lookaside->List, Buffer);
+    Result = InterlockedDecrement(&Lookaside->Used);
+    ASSERT3S(Result, >=, 0);
+        
+    if (Result == 0) {
+        KeSetEvent(&Lookaside->Empty, IO_NO_INCREMENT, FALSE);
+    }
+}
+
+static FORCEINLINE VOID
+__LookasideDebug(
+    IN  PXENVBD_LOOKASIDE           Lookaside,
+    IN  PXENBUS_DEBUG_INTERFACE     Debug,
+    IN  PXENBUS_DEBUG_CALLBACK      Callback,
+    IN  PCHAR                       Name
+    )
+{
+    DEBUG(Printf, Debug, Callback,
+          "LOOKASIDE: %s: %u / %u (%u failed)\n",
+          Name, Lookaside->Used,
+          Lookaside->Max, Lookaside->Failed);
+
+    Lookaside->Max = Lookaside->Used;
+    Lookaside->Failed = 0;
+}
+
+//=============================================================================
 // Debug
 static FORCEINLINE PCHAR
 __PnpStateName(
@@ -177,23 +261,6 @@ __PnpStateName(
     case Deleted:               return "Deleted";
     default:                    return "UNKNOWN";
     }
-}
-
-static FORCEINLINE VOID
-__LookasideDebug(
-    IN  PXENVBD_LOOKASIDE           Lookaside,
-    IN  PXENBUS_DEBUG_INTERFACE     Debug,
-    IN  PXENBUS_DEBUG_CALLBACK      Callback,
-    IN  PCHAR                       Name
-    )
-{
-    DEBUG(Printf, Debug, Callback,
-          "PDO: %s: %u / %u (%u failed)\n",
-          Name, Lookaside->Used,
-          Lookaside->Max, Lookaside->Failed);
-
-    Lookaside->Max = Lookaside->Used;
-    Lookaside->Failed = 0;
 }
 
 DECLSPEC_NOINLINE VOID
@@ -247,11 +314,12 @@ PdoDebugCallback(
     __LookasideDebug(&Pdo->SegmentList, DebugInterface, DebugCallback, "SEGMENTs");
     __LookasideDebug(&Pdo->MappingList, DebugInterface, DebugCallback, "MAPPINGs");
 
-    FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->FreshSrbs,    "Fresh    ", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->PreparedReqs, "Prepared ", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->SubmittedReqs, "Submitted", DebugInterface, DebugCallback);
     QueueDebugCallback(&Pdo->ShutdownSrbs, "Shutdown ", DebugInterface, DebugCallback);
+
+    FrontendDebugCallback(Pdo->Frontend, DebugInterface, DebugCallback);
 
     Pdo->BlkOpRead = Pdo->BlkOpWrite = 0;
     Pdo->BlkOpIndirectRead = Pdo->BlkOpIndirectWrite = 0;
@@ -412,71 +480,6 @@ __PdoUnpauseDataPath(
     KeAcquireSpinLock(&Pdo->Lock, &Irql);
     --Pdo->Paused;
     KeReleaseSpinLock(&Pdo->Lock, Irql);
-}
-
-static FORCEINLINE VOID
-__LookasideInit(
-    IN OUT  PXENVBD_LOOKASIDE   Lookaside,
-    IN  ULONG                   Size,
-    IN  ULONG                   Tag
-    )
-{
-    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
-    Lookaside->Size = Size;
-    KeInitializeEvent(&Lookaside->Empty, SynchronizationEvent, TRUE);
-    ExInitializeNPagedLookasideList(&Lookaside->List, NULL, NULL, 0,
-                                    Size, Tag, 0);
-}
-
-static FORCEINLINE VOID
-__LookasideTerm(
-    IN  PXENVBD_LOOKASIDE       Lookaside
-    )
-{
-    ASSERT3U(Lookaside->Used, ==, 0);
-    ExDeleteNPagedLookasideList(&Lookaside->List);
-    RtlZeroMemory(Lookaside, sizeof(XENVBD_LOOKASIDE));
-}
-
-static FORCEINLINE PVOID
-__LookasideAlloc(
-    IN  PXENVBD_LOOKASIDE       Lookaside
-    )
-{
-    LONG    Result;
-    PVOID   Buffer;
-
-    Buffer = ExAllocateFromNPagedLookasideList(&Lookaside->List);
-    if (Buffer == NULL) {
-        ++Lookaside->Failed;
-        return NULL;
-    }
-
-    RtlZeroMemory(Buffer, Lookaside->Size);
-    Result = InterlockedIncrement(&Lookaside->Used);
-    ASSERT3S(Result, >, 0);
-    if (Result > Lookaside->Max)
-        Lookaside->Max = Result;
-    KeClearEvent(&Lookaside->Empty);
-
-    return Buffer;
-}
-
-static FORCEINLINE VOID
-__LookasideFree(
-    IN  PXENVBD_LOOKASIDE       Lookaside,
-    IN  PVOID                   Buffer
-    )
-{
-    LONG            Result;
-
-    ExFreeToNPagedLookasideList(&Lookaside->List, Buffer);
-    Result = InterlockedDecrement(&Lookaside->Used);
-    ASSERT3S(Result, >=, 0);
-        
-    if (Result == 0) {
-        KeSetEvent(&Lookaside->Empty, IO_NO_INCREMENT, FALSE);
-    }
 }
 
 //=============================================================================
@@ -860,6 +863,7 @@ PdoPutTag(
     }
 
     KeReleaseSpinLock(&Queue->Lock, Irql);
+    Warning("Target[%d] : Tag %x not found in submitted list\n", PdoGetTargetId(Pdo), Tag);
     return NULL;
 }
 
@@ -1541,71 +1545,97 @@ PrepareUnmap(
 
 //=============================================================================
 // Queue-Related
-VOID
+static FORCEINLINE BOOLEAN
 PdoPrepareFresh(
     __in PXENVBD_PDO             Pdo
     )
 {
-    for (;;) {
-        NTSTATUS        Status;
-        PXENVBD_SRBEXT  SrbExt;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->FreshSrbs);
-        if (Entry == NULL)
-            break;
-        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+    NTSTATUS        Status;
+    PXENVBD_SRBEXT  SrbExt;
+    PLIST_ENTRY     Entry;
 
-        // popped a SRB, process it
-        switch (Cdb_OperationEx(SrbExt->Srb)) {
-        case SCSIOP_READ:
-        case SCSIOP_WRITE:
-            Status = PrepareReadWrite(Pdo, SrbExt->Srb);
-            break;
-        case SCSIOP_SYNCHRONIZE_CACHE:
-            Status = PrepareSyncCache(Pdo, SrbExt->Srb);
-            break;
-        case SCSIOP_UNMAP:
-            Status = PrepareUnmap(Pdo, SrbExt->Srb);
-            break;
-        default:
-            ASSERT(FALSE);
-            Status = STATUS_NOT_SUPPORTED;
-            break;
-        }
+    Entry = QueuePop(&Pdo->FreshSrbs);
+    if (Entry == NULL)
+        return FALSE;   // fresh queue is empty
 
-        // if failed to prepare, put on fresh and finish up
-        if (!NT_SUCCESS(Status)) {
-            QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
-            break;
-        }
+    SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+
+    switch (Cdb_OperationEx(SrbExt->Srb)) {
+    case SCSIOP_READ:
+    case SCSIOP_WRITE:
+        Status = PrepareReadWrite(Pdo, SrbExt->Srb);
+        break;
+    case SCSIOP_SYNCHRONIZE_CACHE:
+        Status = PrepareSyncCache(Pdo, SrbExt->Srb);
+        break;
+    case SCSIOP_UNMAP:
+        Status = PrepareUnmap(Pdo, SrbExt->Srb);
+        break;
+    default:
+        ASSERT(FALSE);
+        Status = STATUS_NOT_SUPPORTED;
+        break;
     }
+
+    if (NT_SUCCESS(Status))
+        return TRUE;    // prepared this SRB
+
+    QueueUnPop(&Pdo->FreshSrbs, &SrbExt->Entry);
+    return FALSE;       // prepare failed
 }
 
-VOID
+static FORCEINLINE BOOLEAN
 PdoSubmitPrepared(
     __in PXENVBD_PDO             Pdo
     )
 {
     PXENVBD_BLOCKRING   BlockRing = FrontendGetBlockRing(Pdo->Frontend);
-    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     for (;;) {
         PXENVBD_REQUEST Request;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->PreparedReqs);
+        PLIST_ENTRY     Entry;
+
+        Entry = QueuePop(&Pdo->PreparedReqs);
         if (Entry == NULL)
             break;
+
         Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
 
         QueueAppend(&Pdo->SubmittedReqs, &Request->Entry);
         KeMemoryBarrier();
-        if (!BlockRingSubmit(BlockRing, Request)) {
-            QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
-            QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
-            break;
-        }
+
+        if (BlockRingSubmit(BlockRing, Request))
+            continue;
+
+        QueueRemove(&Pdo->SubmittedReqs, &Request->Entry);
+        QueueUnPop(&Pdo->PreparedReqs, &Request->Entry);
+        return FALSE;   // ring full
     }
 
-    if (BlockRingPush(BlockRing)) {
-        NotifierSend(Notifier);
+    return TRUE;
+}
+
+static FORCEINLINE VOID
+PdoCompleteShutdown(
+    __in PXENVBD_PDO             Pdo
+    )
+{
+    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
+        return;
+
+    if (QueueCount(&Pdo->FreshSrbs) ||
+        QueueCount(&Pdo->PreparedReqs) ||
+        QueueCount(&Pdo->SubmittedReqs))
+        return;
+
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
+        if (Entry == NULL)
+            break;
+        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
+        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
+        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
     }
 }
 
@@ -1627,7 +1657,30 @@ BlkifOperationName(
 }
 
 VOID
-PdoCompleteSubmitted(
+PdoSubmitRequests(
+    __in PXENVBD_PDO             Pdo
+    )
+{
+    for (;;) {
+        // submit all prepared requests (0 or more requests)
+        // return TRUE if submitted 0 or more requests from prepared queue
+        // return FALSE iff ring is full
+        if (!PdoSubmitPrepared(Pdo))
+            break;
+
+        // prepare a single SRB (into 1 or more requests)
+        // return TRUE if prepare succeeded
+        // return FALSE if prepare failed or fresh queue empty
+        if (!PdoPrepareFresh(Pdo))
+            break;
+    }
+
+    // if no requests/SRBs outstanding, complete any shutdown SRBs
+    PdoCompleteShutdown(Pdo);
+}
+
+VOID
+PdoCompleteResponse(
     __in PXENVBD_PDO             Pdo,
     __in ULONG                   Tag,
     __in SHORT                   Status
@@ -1682,30 +1735,6 @@ PdoCompleteSubmitted(
         }
 
         FdoCompleteSrb(PdoGetFdo(Pdo), Srb);
-    }
-}
-
-VOID
-PdoCompleteShutdown(
-    __in PXENVBD_PDO             Pdo
-    )
-{
-    if (QueueCount(&Pdo->ShutdownSrbs) == 0)
-        return;
-
-    if (QueueCount(&Pdo->FreshSrbs) ||
-        QueueCount(&Pdo->PreparedReqs) ||
-        QueueCount(&Pdo->SubmittedReqs))
-        return;
-
-    for (;;) {
-        PXENVBD_SRBEXT  SrbExt;
-        PLIST_ENTRY     Entry = QueuePop(&Pdo->ShutdownSrbs);
-        if (Entry == NULL)
-            break;
-        SrbExt = CONTAINING_RECORD(Entry, XENVBD_SRBEXT, Entry);
-        SrbExt->Srb->SrbStatus = SRB_STATUS_SUCCESS;
-        FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
     }
 }
 
@@ -1834,7 +1863,6 @@ PdoReadWrite(
     __in PSCSI_REQUEST_BLOCK    Srb
     )
 {
-    NTSTATUS            Status;
     PXENVBD_DISKINFO    DiskInfo = FrontendGetDiskInfo(Pdo->Frontend);
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
@@ -1852,12 +1880,6 @@ PdoReadWrite(
         return TRUE; // Complete now
     }
 
-    Status = PrepareReadWrite(Pdo, Srb);
-    if (NT_SUCCESS(Status)) {
-        PdoSubmitPrepared(Pdo);
-        return FALSE;
-    }
-
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
     NotifierTrigger(Notifier);
 
@@ -1871,7 +1893,6 @@ PdoSyncCache(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    NTSTATUS            Status;
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
@@ -1888,12 +1909,6 @@ PdoSyncCache(
         return TRUE;
     }
 
-    Status = PrepareSyncCache(Pdo, Srb);
-    if (NT_SUCCESS(Status)) {
-        PdoSubmitPrepared(Pdo);
-        return FALSE;
-    }
-
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
     NotifierTrigger(Notifier);
 
@@ -1907,7 +1922,6 @@ PdoUnmap(
     __in PSCSI_REQUEST_BLOCK     Srb
     )
 {
-    NTSTATUS            Status;
     PXENVBD_SRBEXT      SrbExt = GetSrbExt(Srb);
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
@@ -1922,12 +1936,6 @@ PdoUnmap(
         Srb->ScsiStatus = 0x00; // SCSI_GOOD
         Srb->SrbStatus = SRB_STATUS_SUCCESS;
         return TRUE;
-    }
-
-    Status = PrepareUnmap(Pdo, Srb);
-    if (NT_SUCCESS(Status)) {
-        PdoSubmitPrepared(Pdo);
-        return FALSE;
     }
 
     QueueAppend(&Pdo->FreshSrbs, &SrbExt->Entry);
