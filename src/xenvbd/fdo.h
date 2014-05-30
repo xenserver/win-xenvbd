@@ -35,6 +35,7 @@
 typedef struct _XENVBD_FDO XENVBD_FDO, *PXENVBD_FDO;
 
 #include <ntddk.h>
+#include <ntstrsafe.h>
 #include <xenvbd-storport.h>
 #include "pdo.h"
 #include <store_interface.h>
