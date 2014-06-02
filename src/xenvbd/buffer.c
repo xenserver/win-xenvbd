@@ -116,7 +116,7 @@ __IsOnList(
     IN  BOOLEAN                 Locked
     )
 {
-    KIRQL       Irql;
+    KIRQL       Irql = KeGetCurrentIrql();
     PLIST_ENTRY Entry;
     BOOLEAN     Found = FALSE;
 

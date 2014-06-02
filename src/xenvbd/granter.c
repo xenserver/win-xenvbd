@@ -43,6 +43,8 @@ struct _XENVBD_GRANTER {
     BOOLEAN                         Enabled;
 
     PXENBUS_GNTTAB_INTERFACE        GnttabInterface;
+    PXENBUS_GNTTAB_CACHE            Cache;
+    KSPIN_LOCK                      Lock;
 
     USHORT                          BackendDomain;
     LONG                            Current;
@@ -103,6 +105,34 @@ GranterDestroy(
     __GranterFree(Granter);
 }
 
+static VOID
+__drv_requiresIRQL(DISPATCH_LEVEL)
+GranterAcquireLock(
+    IN  PVOID               Argument
+    )
+{
+    PXENVBD_GRANTER         Granter = Argument;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    KeAcquireSpinLockAtDpcLevel(&Granter->Lock);
+}
+
+static VOID
+__drv_requiresIRQL(DISPATCH_LEVEL)
+GranterReleaseLock(
+    IN  PVOID               Argument
+    )
+{
+    PXENVBD_GRANTER         Granter = Argument;
+
+    ASSERT3U(KeGetCurrentIrql(), ==, DISPATCH_LEVEL);
+
+    KeReleaseSpinLockFromDpcLevel(&Granter->Lock);
+}
+
+#define MAXNAMELEN  32
+
 NTSTATUS
 GranterConnect(
     IN  PXENVBD_GRANTER             Granter,
@@ -110,14 +140,45 @@ GranterConnect(
     )
 {
     PXENVBD_FDO Fdo = PdoGetFdo(FrontendGetPdo(Granter->Frontend));
+    CHAR        Name[MAXNAMELEN];
+    NTSTATUS    status;
 
     ASSERT(Granter->Connected == FALSE);
 
     Granter->GnttabInterface = FdoAcquireGnttab(Fdo);
     Granter->BackendDomain = BackendDomain;
 
+    status = RtlStringCbPrintfA(Name,
+                                sizeof (Name),
+                                "disk_%d",
+                                FrontendGetTargetId(Granter->Frontend));
+    if (!NT_SUCCESS(status))
+        goto fail1;
+
+    KeInitializeSpinLock(&Granter->Lock);
+
+    status = GNTTAB(CreateCache,
+                    Granter->GnttabInterface,
+                    Name,
+                    0,
+                    GranterAcquireLock,
+                    GranterReleaseLock,
+                    Granter,
+                    &Granter->Cache);
+    if (!NT_SUCCESS(status))
+        goto fail2;
+
     Granter->Connected = TRUE;
     return STATUS_SUCCESS;
+
+fail2:
+fail1:
+    GNTTAB(Release, Granter->GnttabInterface);
+    Granter->GnttabInterface = NULL;
+
+    Granter->BackendDomain = 0;
+
+    return status;
 }
 
 NTSTATUS
@@ -163,11 +224,16 @@ GranterDisconnect(
 
     ASSERT3S(Granter->Current, ==, 0);
     Granter->Maximum = 0;
-    Granter->BackendDomain = 0;
+
+    GNTTAB(DestroyCache,
+           Granter->GnttabInterface,
+           Granter->Cache);
+    Granter->Cache = NULL;
 
     GNTTAB(Release, Granter->GnttabInterface);
     Granter->GnttabInterface = NULL;
 
+    Granter->BackendDomain = 0;
     Granter->Connected = FALSE;
 }
 
@@ -201,21 +267,16 @@ GranterGet(
     NTSTATUS                    status;
     LONG                        Value;
 
-    Descriptor = GNTTAB(Get, 
-                        Granter->GnttabInterface);
-
-    status = STATUS_INSUFFICIENT_RESOURCES;
-    if (Descriptor == NULL)
-        goto fail1;
-
     status = GNTTAB(PermitForeignAccess, 
                     Granter->GnttabInterface, 
-                    Descriptor, 
+                    Granter->Cache,
+                    FALSE,
                     Granter->BackendDomain,
-                    GNTTAB_ENTRY_FULL_PAGE,
                     Pfn,
-                    ReadOnly);
-    ASSERT(NT_SUCCESS(status));
+                    ReadOnly,
+                    &Descriptor);
+    if (!NT_SUCCESS(status))
+        goto fail1;
     
     Value = InterlockedIncrement(&Granter->Current);
     if (Value > Granter->Maximum)
@@ -239,10 +300,10 @@ GranterPut(
 
     status = GNTTAB(RevokeForeignAccess,
                     Granter->GnttabInterface,
+                    Granter->Cache,
+                    FALSE,
                     Descriptor);
     ASSERT(NT_SUCCESS(status));
-
-    GNTTAB(Put, Granter->GnttabInterface, Descriptor);
 
     InterlockedDecrement(&Granter->Current);
 }
