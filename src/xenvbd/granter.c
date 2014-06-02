@@ -150,7 +150,7 @@ GranterConnect(
 
     status = RtlStringCbPrintfA(Name,
                                 sizeof (Name),
-                                "disk_%d",
+                                "disk_%u",
                                 FrontendGetTargetId(Granter->Frontend));
     if (!NT_SUCCESS(status))
         goto fail1;
