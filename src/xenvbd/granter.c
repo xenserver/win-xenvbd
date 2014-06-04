@@ -267,6 +267,10 @@ GranterGet(
     NTSTATUS                    status;
     LONG                        Value;
 
+    status = STATUS_DEVICE_NOT_READY;
+    if (Granter->Enabled == FALSE)
+        goto fail1;
+
     status = GNTTAB(PermitForeignAccess, 
                     Granter->GnttabInterface, 
                     Granter->Cache,
@@ -276,7 +280,7 @@ GranterGet(
                     ReadOnly,
                     &Descriptor);
     if (!NT_SUCCESS(status))
-        goto fail1;
+        goto fail2;
     
     Value = InterlockedIncrement(&Granter->Current);
     if (Value > Granter->Maximum)
@@ -285,6 +289,7 @@ GranterGet(
     *Handle = Descriptor;
     return STATUS_SUCCESS;
 
+fail2:
 fail1:
     return status;
 }
@@ -297,6 +302,9 @@ GranterPut(
 {
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
     NTSTATUS                    status;
+
+    if (Granter->Enabled == FALSE)
+        return;
 
     status = GNTTAB(RevokeForeignAccess,
                     Granter->GnttabInterface,
@@ -315,6 +323,9 @@ GranterReference(
     )
 {
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
+
+    if (Granter->Enabled == FALSE)
+        return 0;
 
     return GNTTAB(Reference, Granter->GnttabInterface, Descriptor);
 }

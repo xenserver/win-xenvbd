@@ -447,27 +447,37 @@ __PdoRestoreDevicePnpState(
     }
 }
 
-__drv_maxIRQL(APC_LEVEL)
 static FORCEINLINE VOID
 __PdoPauseDataPath(
-    __in PXENVBD_PDO             Pdo
+    __in PXENVBD_PDO             Pdo,
+    __in BOOLEAN                 Timeout
     )
 {
     KIRQL               Irql;
-    LARGE_INTEGER       Timeout;
+    ULONG               Requests;
+    ULONG               Count = 0;
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
 
     KeAcquireSpinLock(&Pdo->Lock, &Irql);
     ++Pdo->Paused;
     KeReleaseSpinLock(&Pdo->Lock, Irql);
 
-    Verbose("Target[%d] : Waiting for %d Submitted requests\n", PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedReqs));
+    Requests = QueueCount(&Pdo->SubmittedReqs);
+    KeMemoryBarrier();
 
-    Timeout.QuadPart = -10000000;
+    Verbose("Target[%d] : Waiting for %d Submitted requests\n", PdoGetTargetId(Pdo), Requests);
+
     while (QueueCount(&Pdo->SubmittedReqs)) {
-        NotifierSend(Notifier); // let backend know it needs to do some work
-        KeDelayExecutionThread(KernelMode, FALSE, &Timeout);
+        if (Timeout && Count > 60000)
+            break;
+        FrontendNotifyResponses(Pdo->Frontend);
+        NotifierSend(Notifier);         // let backend know it needs to do some work
+        StorPortStallExecution(500);    // 500 micro-seconds
+        ++Count;
     }
+
+    Verbose("Target[%d] : %u/%u Submitted requests left (%u iterrations)\n",
+            PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedReqs), Requests, Count);
 }
 
 static FORCEINLINE VOID
@@ -691,7 +701,7 @@ PdoD0ToD3(
 
     // close frontend
     if (Pdo->EmulatedUnplugged) {
-        __PdoPauseDataPath(Pdo);
+        __PdoPauseDataPath(Pdo, FALSE);
         (VOID) FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
         PdoAbortAllSrbs(Pdo);
         ASSERT3U(QueueCount(&Pdo->SubmittedReqs), ==, 0);
@@ -2274,45 +2284,29 @@ PdoReset(
     __in PXENVBD_PDO             Pdo
     )
 {
-    ULONG               Count;
-    PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
+    NTSTATUS        Status;
 
     Trace("Target[%d] ====> (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 
-    // Handles FreshSrbs and PreparedReqs
-    PdoAbortAllSrbs(Pdo);
+    // poll until SubmittedReqs are complete, dont submit any new requests
+    __PdoPauseDataPath(Pdo, TRUE);
 
-    // SubmittedReqs (5 secs)
-    for (Count = 0; QueueCount(&Pdo->SubmittedReqs) && Count < 50000; ++Count) {
-        FrontendNotifyResponses(Pdo->Frontend);
-        NotifierSend(Notifier);
-        StorPortStallExecution(100); // 100 micro-seconds
-    }
+    // if there are submitted reqs left, BSOD, its the only way to be sure
     if (QueueCount(&Pdo->SubmittedReqs)) {
-        Warning("Target[%d] : Still have %u requests outstanding\n", PdoGetTargetId(Pdo),
-                                QueueCount(&Pdo->SubmittedReqs));
-
-        for (;;) {
-            PXENVBD_SRBEXT  SrbExt;
-            PXENVBD_REQUEST Request;
-            PLIST_ENTRY     Entry = QueuePop(&Pdo->SubmittedReqs);
-            if (Entry == NULL)
-                break;
-            Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
-            SrbExt = GetSrbExt(Request->Srb);
-
-            Verbose("Target[%d] : SubmittedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
-        
-            SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
-            RequestCleanup(Pdo, Request);
-            __LookasideFree(&Pdo->RequestList, Request);
-
-            if (InterlockedDecrement(&SrbExt->Count) == 0) {
-                SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
-                FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
-            }
-        }
+        BUG("backend contains outstanding requests after reset");
     }
+
+    Status = FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
+    ASSERT(NT_SUCCESS(Status));
+
+    // unprepare all PreparedReqs and abort all FreshSrbs
+    PdoAbortAllSrbs(Pdo);
+    ASSERT3U(QueueCount(&Pdo->SubmittedReqs), ==, 0);
+
+    Status = FrontendSetState(Pdo->Frontend, XENVBD_ENABLED);
+    ASSERT(NT_SUCCESS(Status));
+
+    __PdoUnpauseDataPath(Pdo);
 
     Trace("Target[%d] <==== (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 }
