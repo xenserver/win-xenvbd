@@ -268,7 +268,7 @@ GranterGet(
     LONG                        Value;
 
     status = STATUS_DEVICE_NOT_READY;
-    if (Granter->Enabled == FALSE)
+    if (Granter->Connected == FALSE)
         goto fail1;
 
     status = GNTTAB(PermitForeignAccess, 
@@ -303,7 +303,7 @@ GranterPut(
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
     NTSTATUS                    status;
 
-    if (Granter->Enabled == FALSE)
+    if (Granter->Connected == FALSE)
         return;
 
     status = GNTTAB(RevokeForeignAccess,
@@ -324,7 +324,7 @@ GranterReference(
 {
     PXENBUS_GNTTAB_DESCRIPTOR   Descriptor = Handle;
 
-    if (Granter->Enabled == FALSE)
+    if (Granter->Connected == FALSE)
         return 0;
 
     return GNTTAB(Reference, Granter->GnttabInterface, Descriptor);
