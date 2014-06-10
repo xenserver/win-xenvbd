@@ -467,12 +467,13 @@ __PdoPauseDataPath(
 
     Verbose("Target[%d] : Waiting for %d Submitted requests\n", PdoGetTargetId(Pdo), Requests);
 
+    // poll ring and send event channel notification every 1ms (for up to 3 minutes)
     while (QueueCount(&Pdo->SubmittedReqs)) {
-        if (Timeout && Count > 60000)
+        if (Timeout && Count > 180000)
             break;
         FrontendNotifyResponses(Pdo->Frontend);
         NotifierSend(Notifier);         // let backend know it needs to do some work
-        StorPortStallExecution(500);    // 500 micro-seconds
+        StorPortStallExecution(1000);   // 1000 micro-seconds
         ++Count;
     }
 
@@ -873,7 +874,8 @@ PdoPutTag(
     }
 
     KeReleaseSpinLock(&Queue->Lock, Irql);
-    Warning("Target[%d] : Tag %x not found in submitted list\n", PdoGetTargetId(Pdo), Tag);
+    Warning("Target[%d] : Tag %x not found in submitted list (%u items)\n",
+            PdoGetTargetId(Pdo), Tag, QueueCount(Queue));
     return NULL;
 }
 
@@ -1717,14 +1719,14 @@ PdoCompleteResponse(
         // Remove appropriate feature support
         FrontendRemoveFeature(Pdo->Frontend, Request->Operation);
         Srb->SrbStatus = SRB_STATUS_INVALID_REQUEST;
-        Warning("Target[%d] : %s BLKIF_RSP_EOPNOTSUPP\n", 
-                PdoGetTargetId(Pdo), BlkifOperationName(Request->Operation));
+        Warning("Target[%d] : %s BLKIF_RSP_EOPNOTSUPP (Tag %x)\n",
+                PdoGetTargetId(Pdo), BlkifOperationName(Request->Operation), Tag);
         break;
 
     case BLKIF_RSP_ERROR:
     default:
-        Warning("Target[%d] : %s BLKIF_RSP_ERROR\n", 
-                PdoGetTargetId(Pdo), BlkifOperationName(Request->Operation));
+        Warning("Target[%d] : %s BLKIF_RSP_ERROR (Tag %x)\n",
+                PdoGetTargetId(Pdo), BlkifOperationName(Request->Operation), Tag);
         Srb->SrbStatus = SRB_STATUS_ERROR;
         break;
     }
@@ -2293,6 +2295,8 @@ PdoReset(
 
     // if there are submitted reqs left, BSOD, its the only way to be sure
     if (QueueCount(&Pdo->SubmittedReqs)) {
+        Error("Target[%d] : backend has %u outstanding requests after a PdoReset\n",
+                PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedReqs));
         BUG("backend contains outstanding requests after reset");
     }
 
