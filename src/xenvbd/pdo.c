@@ -471,7 +471,7 @@ __PdoPauseDataPath(
     while (QueueCount(&Pdo->SubmittedReqs)) {
         if (Timeout && Count > 180000)
             break;
-        FrontendNotifyResponses(Pdo->Frontend);
+        NotifierTrigger(Notifier);      // queue DPC to poll frontend
         NotifierSend(Notifier);         // let backend know it needs to do some work
         StorPortStallExecution(1000);   // 1000 micro-seconds
         ++Count;
