@@ -345,7 +345,7 @@ IncreaseDiskTimeout(
     HRESULT     Error;
 
     Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
-                         SERVICE_KEY("Disk"),
+                         SERVICE_KEY(Disk),
                          0,
                          KEY_ALL_ACCESS,
                          &Key);
