@@ -335,6 +335,92 @@ fail1:
 }
 
 static BOOLEAN
+IncreaseDiskTimeout(
+    )
+{
+    HKEY        Key;
+    DWORD       Type;
+    DWORD       Size;
+    DWORD       Value = 0;
+    HRESULT     Error;
+
+    Error = RegOpenKeyEx(HKEY_LOCAL_MACHINE,
+                         SERVICE_KEY("Disk"),
+                         0,
+                         KEY_ALL_ACCESS,
+                         &Key);
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail1;
+    }
+
+    Error = RegQueryValueEx(Key,
+                            "TimeOutValue",
+                            NULL,
+                            &Type,
+                            (LPBYTE)&Value,
+                            &Size);
+    if (Error != ERROR_SUCCESS) {
+        goto write_value;
+    }
+
+    if (Type != REG_DWORD) {
+        SetLastError(ERROR_INVALID_DATA);
+        goto fail2;
+    }
+
+    if (Size != sizeof(DWORD)) {
+        SetLastError(ERROR_BAD_LENGTH);
+        goto fail3;
+    }
+
+    if (Value >= 120)
+        goto done;
+
+write_value:
+    Value = 120;
+    Error = RegSetValueEx(Key,
+                          "TimeOutValue",
+                          0,
+                          REG_DWORD,
+                          (LPBYTE)&Value,
+                          (DWORD)sizeof(DWORD));
+    if (Error != ERROR_SUCCESS) {
+        SetLastError(Error);
+        goto fail4;
+    }
+
+done:
+    RegCloseKey(Key);
+
+    return TRUE;
+
+fail4:
+    Log("fail4\n");
+
+fail3:
+    Log("fail3\n");
+
+fail2:
+    Log("fail2");
+
+    RegCloseKey(Key);
+
+fail1:
+    Error = GetLastError();
+
+    {
+        PTCHAR  Message;
+
+        Message = GetErrorMessage(Error);
+        Log("fail1 (%s)", Message);
+        LocalFree(Message);
+    }
+
+    return FALSE;
+}
+
+static BOOLEAN
 IncrementServiceCount(
     OUT PDWORD  Count
     )
@@ -595,6 +681,7 @@ __DifInstallPostProcess(
 
     if (Count == 1) {
         ModifyBootGPO();
+        IncreaseDiskTimeout();
         (VOID) RequestReboot(DeviceInfoSet, DeviceInfoData);
     }
 
