@@ -457,6 +457,7 @@ __PdoPauseDataPath(
     ULONG               Requests;
     ULONG               Count = 0;
     PXENVBD_NOTIFIER    Notifier = FrontendGetNotifier(Pdo->Frontend);
+    PXENVBD_BLOCKRING   BlockRing = FrontendGetBlockRing(Pdo->Frontend);
 
     KeAcquireSpinLock(&Pdo->Lock, &Irql);
     ++Pdo->Paused;
@@ -471,7 +472,9 @@ __PdoPauseDataPath(
     while (QueueCount(&Pdo->SubmittedReqs)) {
         if (Timeout && Count > 180000)
             break;
-        NotifierTrigger(Notifier);      // queue DPC to poll frontend
+        KeRaiseIrql(DISPATCH_LEVEL, &Irql);
+        BlockRingPoll(BlockRing);
+        KeLowerIrql(Irql);
         NotifierSend(Notifier);         // let backend know it needs to do some work
         StorPortStallExecution(1000);   // 1000 micro-seconds
         ++Count;
