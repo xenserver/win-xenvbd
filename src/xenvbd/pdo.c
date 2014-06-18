@@ -706,8 +706,8 @@ PdoD0ToD3(
     // close frontend
     if (Pdo->EmulatedUnplugged) {
         __PdoPauseDataPath(Pdo, FALSE);
-        (VOID) FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
         PdoAbortAllSrbs(Pdo);
+        (VOID) FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
         ASSERT3U(QueueCount(&Pdo->SubmittedReqs), ==, 0);
     }
 
@@ -2293,10 +2293,9 @@ PdoReset(
 
     Trace("Target[%d] ====> (Irql=%d)\n", PdoGetTargetId(Pdo), KeGetCurrentIrql());
 
-    // poll until SubmittedReqs are complete, dont submit any new requests
     __PdoPauseDataPath(Pdo, TRUE);
+    PdoAbortAllSrbs(Pdo);
 
-    // if there are submitted reqs left, BSOD, its the only way to be sure
     if (QueueCount(&Pdo->SubmittedReqs)) {
         Error("Target[%d] : backend has %u outstanding requests after a PdoReset\n",
                 PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedReqs));
@@ -2305,10 +2304,6 @@ PdoReset(
 
     Status = FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
     ASSERT(NT_SUCCESS(Status));
-
-    // unprepare all PreparedReqs and abort all FreshSrbs
-    PdoAbortAllSrbs(Pdo);
-    ASSERT3U(QueueCount(&Pdo->SubmittedReqs), ==, 0);
 
     Status = FrontendSetState(Pdo->Frontend, XENVBD_ENABLED);
     ASSERT(NT_SUCCESS(Status));
