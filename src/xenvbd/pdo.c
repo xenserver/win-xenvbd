@@ -2284,6 +2284,34 @@ __PdoQueueShutdown(
     NotifierTrigger(Notifier);
 }
 
+static FORCEINLINE VOID
+__PdoCleanupSubmittedReqs(
+    IN  PXENVBD_PDO             Pdo
+    )
+{
+    // Fail PreparedReqs
+    for (;;) {
+        PXENVBD_SRBEXT  SrbExt;
+        PXENVBD_REQUEST Request;
+        PLIST_ENTRY     Entry = QueuePop(&Pdo->SubmittedReqs);
+        if (Entry == NULL)
+            break;
+        Request = CONTAINING_RECORD(Entry, XENVBD_REQUEST, Entry);
+        SrbExt = GetSrbExt(Request->Srb);
+
+        Verbose("Target[%d] : SubmittedReq 0x%p -> FAILED\n", PdoGetTargetId(Pdo), Request);
+
+        RequestCleanup(Pdo, Request);
+        __LookasideFree(&Pdo->RequestList, Request);
+
+        if (InterlockedDecrement(&SrbExt->Count) == 0) {
+            SrbExt->Srb->SrbStatus = SRB_STATUS_ABORTED;
+            SrbExt->Srb->ScsiStatus = 0x40; // SCSI_ABORTED
+            FdoCompleteSrb(PdoGetFdo(Pdo), SrbExt->Srb);
+        }
+    }
+}
+
 VOID
 PdoReset(
     __in PXENVBD_PDO             Pdo
@@ -2299,8 +2327,12 @@ PdoReset(
     if (QueueCount(&Pdo->SubmittedReqs)) {
         Error("Target[%d] : backend has %u outstanding requests after a PdoReset\n",
                 PdoGetTargetId(Pdo), QueueCount(&Pdo->SubmittedReqs));
-        BUG("backend contains outstanding requests after reset");
     }
+
+    Status = FrontendSetState(Pdo->Frontend, XENVBD_CLOSING);
+    ASSERT(NT_SUCCESS(Status));
+
+    __PdoCleanupSubmittedReqs(Pdo);
 
     Status = FrontendSetState(Pdo->Frontend, XENVBD_CLOSED);
     ASSERT(NT_SUCCESS(Status));

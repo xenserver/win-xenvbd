@@ -93,6 +93,7 @@ __XenvbdStateName(
     switch (State) {
     case XENVBD_STATE_INVALID:      return "STATE_INVALID";
     case XENVBD_INITIALIZED:        return "INITIALIZED";
+    case XENVBD_CLOSING:            return "CLOSING";
     case XENVBD_CLOSED:             return "CLOSED";
     case XENVBD_PREPARED:           return "PREPARED";
     case XENVBD_CONNECTED:          return "CONNECTED";
@@ -1045,6 +1046,7 @@ __FrontendSetState(
         switch (Frontend->State) {
         case XENVBD_INITIALIZED:
             switch (State) {
+            case XENVBD_CLOSING:
             case XENVBD_CLOSED:
             case XENVBD_PREPARED:
             case XENVBD_CONNECTED:
@@ -1107,6 +1109,7 @@ __FrontendSetState(
                     Failed = TRUE;
                 }
                 break;
+            case XENVBD_CLOSING:
             case XENVBD_CLOSED:
                 Status = FrontendClose(Frontend);
                 if (NT_SUCCESS(Status)) {
@@ -1128,12 +1131,12 @@ __FrontendSetState(
                 FrontendEnable(Frontend);
                 Frontend->State = XENVBD_ENABLED;
                 break;
+            case XENVBD_CLOSING:
             case XENVBD_CLOSED:
             case XENVBD_PREPARED:
                 Status = FrontendClose(Frontend);
-                FrontendDisconnect(Frontend);
                 if (NT_SUCCESS(Status)) {
-                    Frontend->State = XENVBD_CLOSED;
+                    Frontend->State = XENVBD_CLOSING;
                 } else {
                     Frontend->State = XENVBD_STATE_INVALID;
                     Failed = TRUE;
@@ -1145,8 +1148,25 @@ __FrontendSetState(
             }
             break;
 
+        case XENVBD_CLOSING:
+            switch (State) {
+            case XENVBD_INITIALIZED:
+            case XENVBD_CLOSED:
+            case XENVBD_PREPARED:
+            case XENVBD_CONNECTED:
+            case XENVBD_ENABLED:
+                FrontendDisconnect(Frontend);
+                Frontend->State = XENVBD_CLOSED;
+                break;
+            default:
+                Failed = TRUE;
+                break;
+            }
+            break;
+
         case XENVBD_ENABLED:
             switch (State) {
+            case XENVBD_CLOSING:
             case XENVBD_CLOSED:
             case XENVBD_PREPARED:
             case XENVBD_CONNECTED:
