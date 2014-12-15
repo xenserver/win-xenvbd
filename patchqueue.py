@@ -36,5 +36,7 @@ package = "xenvbd"
 
 components = ["xenvbd", "xendisk", "xencrsh", "coinst"]
 
+sdv_components = ["xencrsh", "xenvbd", "xendisk"]
+
 patchlist = []
 
