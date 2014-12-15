@@ -58,7 +58,7 @@ if __name__ == '__main__':
     xssymstore.add(patchqueue.package, release, 'x64', debug[sys.argv[1]], vs)
 
     if len(sys.argv) <= 2 or sdv[sys.argv[2]]:
-        for component in patchqueue.components:
+        for component in patchqueue.sdv_components:
             xsmsvc.run_sdv(component, patchqueue.package, vs)
 
     xsbuildtool.archive(buildwd+'\\'+patchqueue.package + '.tar', [patchqueue.package,'revision'])
