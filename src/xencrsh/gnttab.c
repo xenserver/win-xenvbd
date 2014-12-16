@@ -63,10 +63,12 @@
 #define GNTTAB_IS_INVALID_REFERENCE(_Reference) \
         ((_Reference) < GNTTAB_RESERVED_ENTRY_COUNT)
 
-#define GNTTAB_IS_OUT_OF_RANGE_REFERENCE(_Reference) \
-        ((_Reference) > GNTTAB_ENTRY_PER_FRAME)
+#define GNTTAB_CRASH_RESERVATION    32
 
-#define GNTTAB_MAX_DESCRIPTOR   (GNTTAB_MAXIMUM_FRAME_COUNT * GNTTAB_ENTRY_PER_FRAME)
+#define GNTTAB_ENTRY_COUNT   (GNTTAB_CRASH_RESERVATION)
+
+#define GNTTAB_IS_OUT_OF_RANGE_REFERENCE(_Reference) \
+        ((_Reference) >= GNTTAB_ENTRY_COUNT)
 
 typedef struct _GNTTAB_REFERENCE_DESCRIPTOR {
     ULONG               Next;   // next free entry
@@ -75,19 +77,15 @@ typedef struct _GNTTAB_REFERENCE_DESCRIPTOR {
 
 typedef struct _XENBUS_GNTTAB_CONTEXT {
     grant_entry_v1_t*           Entry;  // mapped page
-    GNTTAB_REFERENCE_DESCRIPTOR Descriptor[GNTTAB_MAX_DESCRIPTOR]; // free list
+    GNTTAB_REFERENCE_DESCRIPTOR Descriptor[GNTTAB_ENTRY_COUNT]; // free list
     ULONG                       HeadFreeReference; // head free list
     ULONG                       Count;  // number in use
 } XENBUS_GNTTAB_CONTEXT, *PXENBUS_GNTTAB_CONTEXT;
 
 static XENBUS_GNTTAB_CONTEXT    GnttabContext;
 
-#define MAXIMUM_GRANT_ENTRY_PAGES   1
-// Entry(s), Status(s)
-#define MAXIMUM_GRANT_PAGES 1
-
 __declspec(allocate(".gnttab_section"))
-static UCHAR __GnttabSection[(MAXIMUM_GRANT_PAGES + 1) * PAGE_SIZE];
+static UCHAR __GnttabSection[(GNTTAB_MAXIMUM_FRAME_COUNT + 1) * PAGE_SIZE];
 
 extern PHYSICAL_ADDRESS MmGetPhysicalAddress(IN PVOID Buffer);
 static FORCEINLINE PFN_NUMBER
@@ -243,11 +241,11 @@ GnttabInitialize(
     LogVerbose("grant_entry_v1_t* : %p\n", GnttabContext.Entry);
 
     // initialize free list
-    LogVerbose("adding refrences [%08x - %08x]\n", GNTTAB_RESERVED_ENTRY_COUNT, GNTTAB_ENTRY_PER_FRAME - 1);
+    LogVerbose("adding refrences [%08x - %08x]\n", GNTTAB_RESERVED_ENTRY_COUNT, GNTTAB_ENTRY_COUNT - 1);
 
     GnttabContext.HeadFreeReference = GNTTAB_INVALID_REFERENCE;
     GnttabContext.Count = 0;
-    for (Reference = GNTTAB_ENTRY_PER_FRAME - 1; Reference >= GNTTAB_RESERVED_ENTRY_COUNT; --Reference) {
+    for (Reference = GNTTAB_ENTRY_COUNT - 1; Reference >= GNTTAB_RESERVED_ENTRY_COUNT; --Reference) {
         PGNTTAB_REFERENCE_DESCRIPTOR    Descriptor = &GnttabContext.Descriptor[Reference];
 
         ASSERT(GNTTAB_IS_INVALID_REFERENCE(Descriptor->Next));
