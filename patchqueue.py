@@ -30,7 +30,7 @@
 
 baserepo = "git://hg.uk.xensource.com/closed/windows/xenbits/win-xenvbd.git"
 
-basetag = "f7c3c9a0713fda5bc7f2fb7b0d08b8e5c85b4c35"
+basetag = "0305ef8a1fa6de044d074ee35258f9c8945dfc75"
 
 package = "xenvbd"
 
@@ -38,5 +38,7 @@ components = ["xenvbd", "xendisk", "xencrsh", "coinst"]
 
 sdv_components = ["xencrsh", "xenvbd", "xendisk"]
 
-patchlist = []
+patchlist = [
+        "win-pv-devel PATCH Handle storage query ioctls properly.txt"
+        ]
 

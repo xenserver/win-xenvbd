@@ -9,7 +9,7 @@ def remove_readonly(func, path, execinfo):
     os.unlink(path)
 
 def apply(patchname):
-    res = xsbuildtool.shell(['git', 'am', patchname], None)
+    res = xsbuildtool.shell(['git', 'am', '"'+patchname+'"'], None)
     if res != 0 :
         raise Exception("git am "+patchname+" returned ", res)
 
