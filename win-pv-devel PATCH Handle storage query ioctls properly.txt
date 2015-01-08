@@ -1,0 +1,212 @@
+Received: from FTLPEX01CL01.citrite.net (10.13.107.78) by
+ AMSPEX01CL03.citrite.net (10.69.46.34) with Microsoft SMTP Server (TLS) id
+ 14.3.210.2; Thu, 8 Jan 2015 16:25:47 +0100
+Received: from SMTP.CITRIX.COM (10.7.7.230) by smtprelay.citrix.com
+ (10.13.107.78) with Microsoft SMTP Server id 14.3.210.2; Thu, 8 Jan 2015
+ 10:25:45 -0500
+Received: from lists.xen.org ([50.57.142.19])  by SMTP.CITRIX.COM with
+ ESMTP/TLS/AES256-SHA; 08 Jan 2015 15:25:23 +0000
+Received: from localhost ([127.0.0.1] helo=lists.xen.org)	by lists.xen.org
+ with esmtp (Exim 4.72)	(envelope-from
+ <win-pv-devel-bounces@lists.xenproject.org>)	id 1Y9Ex2-0008Dc-8C; Thu, 08 Jan
+ 2015 15:24:44 +0000
+Received: from mail6.bemta3.messagelabs.com ([195.245.230.39])	by
+ lists.xen.org with esmtp (Exim 4.72)	(envelope-from
+ <Paul.Durrant@citrix.com>) id 1Y9Ex1-0008DF-26	for
+ win-pv-devel@lists.xenproject.org; Thu, 08 Jan 2015 15:24:43 +0000
+Received: from [85.158.137.68] by server-13.bemta-3.messagelabs.com id
+	54/BB-27623-A31AEA45; Thu, 08 Jan 2015 15:24:42 +0000
+Received: (qmail 25307 invoked from network); 8 Jan 2015 15:24:41 -0000
+Received: from smtp02.citrix.com (HELO SMTP02.CITRIX.COM) (66.165.176.63)	by
+ server-8.tower-31.messagelabs.com with RC4-SHA encrypted SMTP;	8 Jan 2015
+ 15:24:41 -0000
+Received: from ukmail1.uk.xensource.com (10.80.16.128) by smtprelay.citrix.com
+	(10.13.107.78) with Microsoft SMTP Server id 14.3.210.2;	Thu, 8 Jan 2015
+ 10:23:58 -0500
+Received: from fountains.uk.xensource.com ([10.80.2.29]
+	helo=localhost.localdomain)	by ukmail1.uk.xensource.com with esmtp	(Exim
+	4.69)	(envelope-from <paul.durrant@citrix.com>)	id 1Y9EwI-0003ct-BB;	Thu, 08
+ Jan 2015 15:23:58 +0000
+From: Paul Durrant <Paul.Durrant@citrix.com>
+To: "win-pv-devel@lists.xenproject.org" <win-pv-devel@lists.xenproject.org>
+CC: Paul Durrant <Paul.Durrant@citrix.com>
+Subject: [win-pv-devel] [PATCH] Handle storage query ioctls properly
+Thread-Topic: [win-pv-devel] [PATCH] Handle storage query ioctls properly
+Thread-Index: AQHQK1dgDrEe/6SDRk65xOaCKb60cA==
+Sender: "win-pv-devel-bounces@lists.xenproject.org"
+	<win-pv-devel-bounces@lists.xenproject.org>
+Date: Thu, 8 Jan 2015 15:24:21 +0000
+Message-ID: <1420730661-4932-1-git-send-email-paul.durrant@citrix.com>
+List-Help: <mailto:win-pv-devel-request@lists.xenproject.org?subject=help>
+List-Subscribe: <http://lists.xenproject.org/cgi-bin/mailman/listinfo/win-pv-devel>,
+	<mailto:win-pv-devel-request@lists.xenproject.org?subject=subscribe>
+List-Unsubscribe: <http://lists.xenproject.org/cgi-bin/mailman/options/win-pv-devel>,
+	<mailto:win-pv-devel-request@lists.xenproject.org?subject=unsubscribe>
+Content-Language: en-GB
+X-MS-Exchange-Organization-AuthAs: Anonymous
+X-MS-Exchange-Organization-AuthSource: FTLPEX01CL01.citrite.net
+X-MS-Has-Attach:
+X-Auto-Response-Suppress: All
+X-MS-TNEF-Correlator:
+x-remote-ip: 50.57.142.19
+x-sbrs: 5.6
+x-policy: $ACCEPTED
+x-ironport-av: E=Sophos;i="5.07,723,1413244800"; d="scan'208";a="213378413"
+x-ironport-server: ftlpip01.citrite.net
+x-ironport-anti-spam-result: AksAALCgrlQyOY4TnGdsb2JhbABcg1hYBLxKiQwdCocEQwEBAQEBAQIOAQEBAQEICwkJFC6CdSwISAEcAgQBASQTDAoeCwMDAQIGAkAEBAgDASMBNRMFGYgOBAEIphUZi0kBAZRMAQEIIo8wgn0MQIEwBYUxjEWDJoIegT6ESQ+NeR+BUG+BBEF+AQEB
+x-mesageid: 212707994
+x-ironport-anti-spam-filtered: true
+x-originating-ip: [66.165.176.63]
+received-spf: None (SMTP.CITRIX.COM: no sender authenticity  information
+ available from domain of  postmaster@lists.xen.org) identity=helo;
+  client-ip=50.57.142.19; receiver=SMTP.CITRIX.COM;
+  envelope-from="win-pv-devel-bounces@lists.xenproject.org";
+  x-sender="postmaster@lists.xen.org";  x-conformance=sidf_compatible
+Content-Type: text/plain; charset="us-ascii"
+Content-ID: <940DD9A1B0054B4891C16079FC7274A7@citrix.com>
+Content-Transfer-Encoding: quoted-printable
+MIME-Version: 1.0
+
+Both the ioctls we care about are METHOD_BUFFERED so ASSERT that and then
+use the associated IRP SystemBuffer, remembering to verify input and output
+sizes.
+Also we should only return (or expect returned) data in the case of a full
+query, as opposed to an existence query.
+
+Signed-off-by: Paul Durrant <paul.durrant@citrix.com>
+---
+ src/xendisk/pdo.c | 64 +++++++++++++++++++++++++++++++++++++++------------=
+----
+ 1 file changed, 46 insertions(+), 18 deletions(-)
+
+diff --git a/src/xendisk/pdo.c b/src/xendisk/pdo.c
+index 47559ba..fe11e18 100644
+--- a/src/xendisk/pdo.c
++++ b/src/xendisk/pdo.c
+@@ -380,7 +380,10 @@ __PdoQueryProperty(
+     if (!NT_SUCCESS(Irp->IoStatus.Status))
+         goto done;
+=20
+-    Descriptor =3D Irp->UserBuffer;
++    if (Irp->IoStatus.Information !=3D (ULONG_PTR)sizeof(STORAGE_ACCESS_AL=
+IGNMENT_DESCRIPTOR))
++        goto done;
++
++    Descriptor =3D Irp->AssociatedIrp.SystemBuffer;
+     Pdo->SectorSize =3D Descriptor->BytesPerLogicalSector;
+     Verbose("%p : %u bytes per sector\n", Pdo->Dx->DeviceObject, Pdo->Sect=
+orSize);
+=20
+@@ -392,37 +395,58 @@ done:
+=20
+ static DECLSPEC_NOINLINE NTSTATUS
+ PdoQueryProperty(
+-    IN  PXENDISK_PDO    Pdo,
+-    IN  PIRP            Irp
++    IN  PXENDISK_PDO        Pdo,
++    IN  PIRP                Irp
+     )
+ {
++    PIO_STACK_LOCATION      StackLocation;
+     PSTORAGE_PROPERTY_QUERY Query;
+-    PDEVICE_TRIM_DESCRIPTOR Trim;
+     NTSTATUS                status;
+=20
++    StackLocation =3D IoGetCurrentIrpStackLocation(Irp);
++
++    if (StackLocation->Parameters.DeviceIoControl.InputBufferLength <
++        sizeof (STORAGE_PROPERTY_QUERY))
++        return PdoCompleteIrp(Pdo, Irp, STATUS_INFO_LENGTH_MISMATCH);
++
+     Query =3D Irp->AssociatedIrp.SystemBuffer;
+=20
+     switch (Query->PropertyId) {
+     case StorageAccessAlignmentProperty:
+-        IoCopyCurrentIrpStackLocationToNext(Irp);
+-        IoSetCompletionRoutine(Irp,
+-                                __PdoQueryProperty,
+-                                Pdo,
+-                                TRUE,
+-                                TRUE,
+-                                TRUE);
+-
+-        status =3D IoCallDriver(Pdo->LowerDeviceObject, Irp);
++        if (Query->QueryType =3D=3D PropertyStandardQuery) {
++            IoCopyCurrentIrpStackLocationToNext(Irp);
++            IoSetCompletionRoutine(Irp,
++                                   __PdoQueryProperty,
++                                   Pdo,
++                                   TRUE,
++                                   TRUE,
++                                   TRUE);
++
++            status =3D IoCallDriver(Pdo->LowerDeviceObject, Irp);
++        } else {
++            status =3D PdoForwardIrpAndForget(Pdo, Irp);
++        }
+         break;
+=20
+     case StorageDeviceTrimProperty:
+-        Trim =3D Irp->AssociatedIrp.SystemBuffer;
++        if (Query->QueryType =3D=3D PropertyStandardQuery) {
++            PDEVICE_TRIM_DESCRIPTOR Trim;
+=20
+-        Trim->Version =3D 0;
+-        Trim->Size =3D sizeof(DEVICE_TRIM_DESCRIPTOR);
+-        Trim->TrimEnabled =3D TRUE;
++            if (StackLocation->Parameters.DeviceIoControl.OutputBufferLeng=
+th <
++                sizeof (DEVICE_TRIM_DESCRIPTOR))
++                return PdoCompleteIrp(Pdo, Irp, STATUS_BUFFER_OVERFLOW);
++
++            Trim =3D Irp->AssociatedIrp.SystemBuffer;
++
++            Trim->Version =3D 0;
++            Trim->Size =3D sizeof(DEVICE_TRIM_DESCRIPTOR);
++            Trim->TrimEnabled =3D TRUE;
++
++            Irp->IoStatus.Information =3D (ULONG_PTR)sizeof(DEVICE_TRIM_DE=
+SCRIPTOR);
++        } else {
++            Irp->IoStatus.Information =3D 0;
++        }
+=20
+-        Irp->IoStatus.Information =3D (ULONG_PTR)sizeof(DEVICE_TRIM_DESCRI=
+PTOR);
+         status =3D PdoCompleteIrp(Pdo, Irp, STATUS_SUCCESS);
+         break;
+=20
+@@ -646,6 +670,7 @@ PdoDispatchControl(
+ {
+     PIO_STACK_LOCATION  StackLocation;
+     ULONG               ControlCode;
++    ULONG               Method;
+     NTSTATUS            status;
+=20
+     status =3D IoAcquireRemoveLock(&Pdo->Dx->RemoveLock, Irp);
+@@ -654,13 +679,16 @@ PdoDispatchControl(
+=20
+     StackLocation =3D IoGetCurrentIrpStackLocation(Irp);
+     ControlCode =3D StackLocation->Parameters.DeviceIoControl.IoControlCod=
+e;
++    Method =3D METHOD_FROM_CTL_CODE(ControlCode);
+=20
+     switch (ControlCode) {
+     case IOCTL_STORAGE_QUERY_PROPERTY:
++        ASSERT(Method =3D=3D METHOD_BUFFERED);
+         status =3D PdoQueryProperty(Pdo, Irp);
+         break;
+=20
+     case IOCTL_STORAGE_MANAGE_DATA_SET_ATTRIBUTES:
++        ASSERT(Method =3D=3D METHOD_BUFFERED);
+         status =3D PdoManageDataSetAttributes(Pdo, Irp);
+         break;
+=20
+--=20
+2.1.1
+
+
+_______________________________________________
+win-pv-devel mailing list
+win-pv-devel@lists.xenproject.org
+http://lists.xenproject.org/cgi-bin/mailman/listinfo/win-pv-devel
