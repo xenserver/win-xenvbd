@@ -30,7 +30,7 @@
 
 baserepo = "git://hg.uk.xensource.com/closed/windows/xenbits/win-xenvbd.git"
 
-basetag = "ea8690c528e099a7181f77bfcd9e1c929ec3eebb"
+basetag = "4fd0b19aff5468b9b568784a359b260ffd65a363"
 
 package = "xenvbd"
 
