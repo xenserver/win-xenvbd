@@ -828,22 +828,22 @@ fail7:
     Error("Fail7\n");
 fail6:
     Error("Fail6\n");
-fail5:
-    Error("Fail5\n");
     (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendSectorCountWatch);
     Frontend->BackendSectorCountWatch = NULL;
-fail4:
-    Error("Fail4\n");
+fail5:
+    Error("Fail5\n");
     (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendSectorSizeWatch);
     Frontend->BackendSectorSizeWatch = NULL;
-fail3:
-    Error("Fail3\n");
+fail4:
+    Error("Fail4\n");
     (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendInfoWatch);
     Frontend->BackendInfoWatch = NULL;
-fail2:
-    Error("Fail2\n");
+fail3:
+    Error("Fail3\n");
     (VOID) STORE(Unwatch, Frontend->Store, Frontend->BackendStateWatch);
     Frontend->BackendStateWatch = NULL;
+fail2:
+    Error("Fail2\n");
 fail1:
     Error("Fail1 (%08x)\n", Status);
     return Status;
